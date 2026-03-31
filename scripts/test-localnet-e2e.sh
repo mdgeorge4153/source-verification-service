@@ -104,11 +104,25 @@ echo "=== Step 3: Start Sui localnet ==="
 RUST_LOG=off "$SUI" start --with-faucet --force-regenesis &>/dev/null &
 SUI_PID=$!
 
-# Wait for localnet
-for i in $(seq 1 30); do
+# Wait for RPC
+echo "Waiting for RPC..."
+for i in $(seq 1 60); do
     if curl -s --connect-timeout 1 http://127.0.0.1:9000 -H 'Content-Type: application/json' \
         -d '{"jsonrpc":"2.0","id":1,"method":"sui_getLatestCheckpointSequenceNumber","params":[]}' \
         2>/dev/null | grep -q result; then
+        echo "RPC ready"
+        break
+    fi
+    sleep 2
+done
+
+# Wait for faucet
+echo "Waiting for faucet..."
+for i in $(seq 1 30); do
+    if curl -s --connect-timeout 1 http://127.0.0.1:9123/gas -X POST \
+        -H 'Content-Type: application/json' -d '{"FixedAmountRequest":{"recipient":"0x0000000000000000000000000000000000000000000000000000000000000000"}}' \
+        2>/dev/null | grep -q "Success\|error"; then
+        echo "Faucet ready"
         break
     fi
     sleep 2
@@ -121,10 +135,15 @@ done
 
 # Get gas from faucet
 ADDR=$("$SUI" client active-address 2>/dev/null)
-curl -s -X POST http://127.0.0.1:9123/gas \
+FAUCET_RESULT=$(curl -s -X POST http://127.0.0.1:9123/gas \
     -H 'Content-Type: application/json' \
-    -d "{\"FixedAmountRequest\":{\"recipient\":\"$ADDR\"}}" > /dev/null
-echo "Localnet running, got gas for $ADDR"
+    -d "{\"FixedAmountRequest\":{\"recipient\":\"$ADDR\"}}")
+if echo "$FAUCET_RESULT" | grep -q "Success"; then
+    echo "Localnet running, got gas for $ADDR"
+else
+    echo "Error: faucet request failed: $FAUCET_RESULT"
+    exit 1
+fi
 
 # ── Step 4: Boot nautilus-local ────────────────────────────────────────────
 echo ""

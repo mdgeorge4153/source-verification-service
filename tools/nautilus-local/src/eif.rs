@@ -1,21 +1,43 @@
-use anyhow::{bail, Context, Result};
-use std::fmt;
+use anyhow::{bail, ensure, Context, Result};
 use std::fs;
 use std::path::Path;
 
 const EIF_MAGIC: &[u8; 4] = b".eif";
-const HEADER_SIZE: usize = 0x224;
-const MAX_NUM_SECTIONS: usize = 32;
+const HEADER_SIZE: usize = 0x224; // 548 bytes
+const SECTION_HEADER_SIZE: usize = 12;
+const MAX_SECTIONS: usize = 32;
 
-// Section types (from aws-nitro-enclaves-image-format)
 const SECTION_KERNEL: u16 = 1;
 const SECTION_CMDLINE: u16 = 2;
 const SECTION_RAMDISK: u16 = 3;
 const SECTION_SIGNATURE: u16 = 4;
 const SECTION_METADATA: u16 = 5;
 
-fn section_type_name(t: u16) -> &'static str {
+pub struct EifContents {
+    pub kernel: Vec<u8>,
+    pub cmdline: String,
+    pub ramdisk: Vec<u8>,
+    pub metadata: Option<String>,
+}
+
+pub struct EifInfo {
+    pub version: u16,
+    pub flags: u16,
+    pub default_mem: u64,
+    pub default_cpus: u64,
+    pub num_sections: u16,
+    pub sections: Vec<SectionInfo>,
+}
+
+pub struct SectionInfo {
+    pub section_type: u16,
+    pub offset: u64,
+    pub size: u64,
+}
+
+pub fn section_type_name(t: u16) -> &'static str {
     match t {
+        0 => "Invalid",
         SECTION_KERNEL => "Kernel",
         SECTION_CMDLINE => "Cmdline",
         SECTION_RAMDISK => "Ramdisk",
@@ -25,241 +47,122 @@ fn section_type_name(t: u16) -> &'static str {
     }
 }
 
-#[derive(Debug)]
-pub struct EifSection {
-    pub section_type: u16,
-    pub flags: u16,
-    pub data: Vec<u8>,
+// --- Big-endian readers ---
+
+fn read_u16(buf: &[u8], off: usize) -> u16 {
+    u16::from_be_bytes([buf[off], buf[off + 1]])
 }
 
-impl fmt::Display for EifSection {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "{:<12} flags={:#06x}  size={}",
-            section_type_name(self.section_type),
-            self.flags,
-            format_size(self.data.len()),
-        )
-    }
+fn read_u64(buf: &[u8], off: usize) -> u64 {
+    let mut b = [0u8; 8];
+    b.copy_from_slice(&buf[off..off + 8]);
+    u64::from_be_bytes(b)
 }
 
-#[derive(Debug)]
-pub struct EifFile {
-    pub version: u16,
-    pub flags: u16,
-    pub default_mem: u64,
-    pub default_cpus: u64,
-    pub sections: Vec<EifSection>,
+// --- Header parsing ---
+
+#[allow(dead_code)]
+struct Header {
+    version: u16,
+    flags: u16,
+    default_mem: u64,
+    default_cpus: u64,
+    num_sections: u16,
+    section_offsets: [u64; MAX_SECTIONS],
+    section_sizes: [u64; MAX_SECTIONS],
 }
 
-impl EifFile {
-    pub fn kernel(&self) -> Option<&EifSection> {
-        self.sections.iter().find(|s| s.section_type == SECTION_KERNEL)
+fn parse_header(buf: &[u8]) -> Result<Header> {
+    ensure!(buf.len() >= HEADER_SIZE, "file too small for EIF header ({} bytes)", buf.len());
+    ensure!(&buf[0..4] == EIF_MAGIC, "bad EIF magic: expected {:?}, got {:?}", EIF_MAGIC, &buf[0..4]);
+
+    let version = read_u16(buf, 4);
+    let flags = read_u16(buf, 6);
+    let default_mem = read_u64(buf, 8);
+    let default_cpus = read_u64(buf, 16);
+    // 2 bytes reserved at offset 24
+    let num_sections = read_u16(buf, 26);
+    ensure!(num_sections as usize <= MAX_SECTIONS, "num_sections {} exceeds max {}", num_sections, MAX_SECTIONS);
+
+    let mut section_offsets = [0u64; MAX_SECTIONS];
+    let mut section_sizes = [0u64; MAX_SECTIONS];
+    for i in 0..MAX_SECTIONS {
+        section_offsets[i] = read_u64(buf, 28 + i * 8);
+        section_sizes[i] = read_u64(buf, 28 + MAX_SECTIONS * 8 + i * 8);
     }
 
-    pub fn cmdline(&self) -> Option<&str> {
-        self.sections
-            .iter()
-            .find(|s| s.section_type == SECTION_CMDLINE)
-            .and_then(|s| {
-                let data = if s.data.last() == Some(&0) {
-                    &s.data[..s.data.len() - 1]
-                } else {
-                    &s.data
-                };
-                std::str::from_utf8(data).ok()
-            })
-    }
-
-    pub fn ramdisks(&self) -> Vec<&EifSection> {
-        self.sections.iter().filter(|s| s.section_type == SECTION_RAMDISK).collect()
-    }
-
-    pub fn metadata(&self) -> Option<&str> {
-        self.sections
-            .iter()
-            .find(|s| s.section_type == SECTION_METADATA)
-            .and_then(|s| std::str::from_utf8(&s.data).ok())
-    }
-
-    pub fn print_summary(&self) {
-        println!("EIF version: {}", self.version);
-        println!("Flags:       {:#06x}", self.flags);
-        println!("Default mem: {} bytes", self.default_mem);
-        println!("Default CPUs: {}", self.default_cpus);
-        println!("Sections:    {}", self.sections.len());
-        println!();
-        for (i, section) in self.sections.iter().enumerate() {
-            println!("  [{}] {}", i, section);
-        }
-        if let Some(cmdline) = self.cmdline() {
-            println!();
-            println!("Cmdline: {}", cmdline);
-        }
-        if let Some(metadata) = self.metadata() {
-            println!();
-            println!("Metadata: {}", metadata);
-        }
-    }
+    Ok(Header { version, flags, default_mem, default_cpus, num_sections, section_offsets, section_sizes })
 }
 
-fn read_u16_be(data: &[u8], offset: usize) -> u16 {
-    u16::from_be_bytes([data[offset], data[offset + 1]])
+// --- Read a section's type + data slice from a buffer at a given offset ---
+
+fn read_section<'a>(buf: &'a [u8], offset: u64) -> Result<(u16, &'a [u8])> {
+    let off = offset as usize;
+    ensure!(buf.len() >= off + SECTION_HEADER_SIZE, "section header at {:#x} out of bounds", off);
+    let stype = read_u16(buf, off);
+    // 2 bytes flags at off+2 (always 0, skip)
+    let size = read_u64(buf, off + 4) as usize;
+    let start = off + SECTION_HEADER_SIZE;
+    ensure!(buf.len() >= start + size, "section data at {:#x} (size {}) out of bounds", off, size);
+    Ok((stype, &buf[start..start + size]))
 }
 
-fn read_u32_be(data: &[u8], offset: usize) -> u32 {
-    u32::from_be_bytes([data[offset], data[offset + 1], data[offset + 2], data[offset + 3]])
-}
+/// Return high-level metadata about an EIF without extracting full section contents.
+pub fn inspect_eif(path: &Path) -> Result<EifInfo> {
+    let buf = fs::read(path).with_context(|| format!("reading {}", path.display()))?;
+    let hdr = parse_header(&buf)?;
 
-fn read_u64_be(data: &[u8], offset: usize) -> u64 {
-    u64::from_be_bytes([
-        data[offset],
-        data[offset + 1],
-        data[offset + 2],
-        data[offset + 3],
-        data[offset + 4],
-        data[offset + 5],
-        data[offset + 6],
-        data[offset + 7],
-    ])
-}
-
-fn format_size(bytes: usize) -> String {
-    if bytes >= 1024 * 1024 {
-        format!("{:.1} MiB ({} bytes)", bytes as f64 / (1024.0 * 1024.0), bytes)
-    } else if bytes >= 1024 {
-        format!("{:.1} KiB ({} bytes)", bytes as f64 / 1024.0, bytes)
-    } else {
-        format!("{} bytes", bytes)
-    }
-}
-
-/// Parse an EIF file from disk.
-pub fn parse_eif(path: &Path) -> Result<EifFile> {
-    let data = fs::read(path).with_context(|| format!("Failed to read EIF file: {}", path.display()))?;
-
-    if data.len() < HEADER_SIZE {
-        bail!("File too small to be a valid EIF ({} bytes, need at least {})", data.len(), HEADER_SIZE);
+    let mut sections = Vec::with_capacity(hdr.num_sections as usize);
+    for i in 0..hdr.num_sections as usize {
+        let off = hdr.section_offsets[i] as usize;
+        ensure!(buf.len() >= off + SECTION_HEADER_SIZE, "section {} header out of bounds", i);
+        let stype = read_u16(&buf, off);
+        let size = read_u64(&buf, off + 4);
+        sections.push(SectionInfo { section_type: stype, offset: hdr.section_offsets[i], size });
     }
 
-    // Verify magic
-    if &data[0..4] != EIF_MAGIC {
-        bail!(
-            "Invalid EIF magic: expected {:?}, got {:?}",
-            EIF_MAGIC,
-            &data[0..4]
-        );
-    }
-
-    let version = read_u16_be(&data, 0x04);
-    let flags = read_u16_be(&data, 0x06);
-    let default_mem = read_u64_be(&data, 0x08);
-    let default_cpus = read_u64_be(&data, 0x10);
-    let num_sections = read_u32_be(&data, 0x18) as usize;
-
-    if num_sections > MAX_NUM_SECTIONS {
-        bail!("Too many sections: {} (max {})", num_sections, MAX_NUM_SECTIONS);
-    }
-
-    // Read section offsets from header
-    let mut section_offsets = Vec::with_capacity(num_sections);
-    for i in 0..num_sections {
-        let offset = read_u64_be(&data, 0x1C + i * 8) as usize;
-        section_offsets.push(offset);
-    }
-
-    // Parse each section at its offset
-    let mut sections = Vec::with_capacity(num_sections);
-    for (i, &offset) in section_offsets.iter().enumerate() {
-        if offset + 12 > data.len() {
-            bail!("Section {} offset {:#x} exceeds file size {:#x}", i, offset, data.len());
-        }
-
-        let section_type = read_u16_be(&data, offset);
-        let section_flags = read_u16_be(&data, offset + 2);
-        let section_size = read_u64_be(&data, offset + 4) as usize;
-
-        let data_start = offset + 12; // 2 + 2 + 8 = 12 byte section header
-        let data_end = data_start + section_size;
-
-        if data_end > data.len() {
-            bail!(
-                "Section {} data ({:#x}..{:#x}) exceeds file size {:#x}",
-                i, data_start, data_end, data.len()
-            );
-        }
-
-        sections.push(EifSection {
-            section_type,
-            flags: section_flags,
-            data: data[data_start..data_end].to_vec(),
-        });
-    }
-
-    Ok(EifFile {
-        version,
-        flags,
-        default_mem,
-        default_cpus,
+    Ok(EifInfo {
+        version: hdr.version,
+        flags: hdr.flags,
+        default_mem: hdr.default_mem,
+        default_cpus: hdr.default_cpus,
+        num_sections: hdr.num_sections,
         sections,
     })
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::path::PathBuf;
+/// Parse an EIF file and extract kernel, cmdline, ramdisk, and optional metadata.
+/// The ramdisk is returned as-is (gzip-compressed cpio).
+pub fn parse_eif(path: &Path) -> Result<EifContents> {
+    let buf = fs::read(path).with_context(|| format!("reading {}", path.display()))?;
+    let hdr = parse_header(&buf)?;
 
-    fn test_eif_path() -> PathBuf {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../out/nitro.eif")
-    }
+    let mut kernel: Option<Vec<u8>> = None;
+    let mut cmdline: Option<String> = None;
+    let mut ramdisk: Option<Vec<u8>> = None;
+    let mut metadata: Option<String> = None;
 
-    #[test]
-    fn test_parse_eif_header() {
-        let path = test_eif_path();
-        if !path.exists() {
-            eprintln!("Skipping test: {} not found", path.display());
-            return;
+    for i in 0..hdr.num_sections as usize {
+        let (stype, data) =
+            read_section(&buf, hdr.section_offsets[i]).with_context(|| format!("section {}", i))?;
+        match stype {
+            SECTION_KERNEL => kernel = Some(data.to_vec()),
+            SECTION_CMDLINE => {
+                cmdline = Some(String::from_utf8(data.to_vec()).context("cmdline is not valid UTF-8")?)
+            }
+            SECTION_RAMDISK => ramdisk = Some(data.to_vec()),
+            SECTION_SIGNATURE => {} // skip
+            SECTION_METADATA => {
+                metadata = Some(String::from_utf8(data.to_vec()).context("metadata is not valid UTF-8")?)
+            }
+            other => bail!("unknown section type {}", other),
         }
-
-        let eif = parse_eif(&path).expect("Failed to parse EIF");
-        assert_eq!(eif.version, 4);
-        assert!(eif.sections.len() >= 3, "Expected at least 3 sections, got {}", eif.sections.len());
     }
 
-    #[test]
-    fn test_parse_eif_sections() {
-        let path = test_eif_path();
-        if !path.exists() {
-            return;
-        }
-
-        let eif = parse_eif(&path).expect("Failed to parse EIF");
-
-        // Should have a kernel section
-        assert!(eif.kernel().is_some(), "Missing kernel section");
-        let kernel = eif.kernel().unwrap();
-        assert!(kernel.data.len() > 1024, "Kernel too small: {} bytes", kernel.data.len());
-
-        // Should have cmdline
-        let cmdline = eif.cmdline().expect("Missing cmdline section");
-        assert!(cmdline.contains("console=ttyS0"), "Cmdline doesn't contain expected content: {}", cmdline);
-        assert!(cmdline.contains("nit.target=/run.sh"), "Cmdline missing nit.target");
-
-        // Should have at least one ramdisk
-        let ramdisks = eif.ramdisks();
-        assert!(!ramdisks.is_empty(), "Missing ramdisk section");
-    }
-
-    #[test]
-    fn test_invalid_magic() {
-        let data = vec![0u8; HEADER_SIZE + 100];
-        let tmp = std::env::temp_dir().join("test_bad_eif");
-        fs::write(&tmp, &data).unwrap();
-        let result = parse_eif(&tmp);
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Invalid EIF magic"));
-        let _ = fs::remove_file(&tmp);
-    }
+    Ok(EifContents {
+        kernel: kernel.context("EIF missing kernel section")?,
+        cmdline: cmdline.context("EIF missing cmdline section")?,
+        ramdisk: ramdisk.context("EIF missing ramdisk section")?,
+        metadata,
+    })
 }

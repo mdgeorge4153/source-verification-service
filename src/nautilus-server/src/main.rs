@@ -18,12 +18,13 @@ async fn main() -> Result<()> {
     // This API_KEY value can be stored with secret-manager. To do that, follow the prompt `sh configure_enclave.sh`
     // Answer `y` to `Do you want to use a secret?` and finish. Otherwise, uncomment this code to use a hardcoded value.
     // let api_key = "045a27812dbe456392913223221306".to_string();
-    #[cfg(not(feature = "seal-example"))]
+    #[cfg(not(any(feature = "seal-example", feature = "source-verification")))]
     let api_key = std::env::var("API_KEY").expect("API_KEY must be set");
 
     // NOTE: if built with `seal-example` flag the `process_data` does not use this api_key from AppState, instead
     // it uses SEAL_API_KEY initialized with two phase bootstrap. Modify this as needed for your application.
-    #[cfg(feature = "seal-example")]
+    // `source-verification` likewise needs no API key.
+    #[cfg(any(feature = "seal-example", feature = "source-verification"))]
     let api_key = String::new();
 
     let state = Arc::new(AppState { eph_kp, api_key });

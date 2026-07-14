@@ -1,0 +1,14 @@
+# External endpoints the enclave is allowed to reach.
+#
+# NOTE (deployment): a Move build resolves the full dependency closure, so this
+# skill needs git + MVR egress, which an allowlist can't fully enumerate
+# (git deps can point anywhere). Reaching "arbitrary git" out of a Nitro enclave
+# means a wildcard/transparent forwarder rather than this fixed list — a
+# deployment task. Whatever mechanism we use, it MUST block link-local/private
+# ranges and the instance-metadata endpoint (169.254.169.254) to avoid SSRF
+# against the parent EC2. This list is the known-needed hosts as a starting point.
+endpoints:
+  - github.com
+  - raw.githubusercontent.com
+  - fullnode.testnet.sui.io
+  # - <mvr resolver host>   # add the MVR endpoint(s) once confirmed

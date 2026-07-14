@@ -37,3 +37,4 @@ seal-sdk = { git = "https://github.com/MystenLabs/seal", rev = "cfb29d2e08ff1ae3
 weather-example = []
 twitter-example = ["regex"]
 seal-example = ["sui-crypto", "sui-sdk-types", "seal-sdk"]
+source-verification = []

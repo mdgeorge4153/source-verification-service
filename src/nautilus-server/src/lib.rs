@@ -21,6 +21,10 @@ mod apps {
     #[cfg(feature = "seal-example")]
     #[path = "seal-example/mod.rs"]
     pub mod seal_example;
+
+    #[cfg(feature = "source-verification")]
+    #[path = "source-verification/mod.rs"]
+    pub mod source_verification;
 }
 
 pub mod app {
@@ -32,6 +36,9 @@ pub mod app {
 
     #[cfg(feature = "seal-example")]
     pub use crate::apps::seal_example::*;
+
+    #[cfg(feature = "source-verification")]
+    pub use crate::apps::source_verification::*;
 }
 
 pub mod common;

@@ -186,6 +186,13 @@ public fun destroy<T>(enclave: Enclave<T>) {
 }
 
 #[test_only]
+/// Fabricate an `Enclave<T>` with a chosen public key, bypassing attestation —
+/// for downstream packages' unit tests of signature-gated functions.
+public fun new_enclave_for_testing<T>(pk: vector<u8>, ctx: &mut TxContext): Enclave<T> {
+    Enclave { id: object::new(ctx), pk, config_version: 0, owner: ctx.sender() }
+}
+
+#[test_only]
 public struct SigningPayload has copy, drop {
     location: String,
     temperature: u64,

@@ -258,5 +258,16 @@ mod tests {
         let msg = IntentMessage::new(payload, 1_700_000_000_000, IntentScope::SourceVerification as u8);
         let bytes = bcs::to_bytes(&msg).expect("bcs");
         println!("SIGNING_BYTES_HEX={}", Hex::encode(&bytes));
+
+        // Deterministic keypair + signature over those bytes, for the Move
+        // package's `attest_source` unit test (fixed pk + sig it can hardcode).
+        use fastcrypto::ed25519::Ed25519KeyPair;
+        use fastcrypto::traits::{KeyPair, Signer, ToFromBytes};
+        use rand::SeedableRng;
+        let mut rng = rand::rngs::StdRng::from_seed([7u8; 32]);
+        let kp = Ed25519KeyPair::generate(&mut rng);
+        let sig = kp.sign(&bytes);
+        println!("PK_HEX={}", Hex::encode(kp.public().as_bytes()));
+        println!("SIG_HEX={}", Hex::encode(sig.as_ref()));
     }
 }

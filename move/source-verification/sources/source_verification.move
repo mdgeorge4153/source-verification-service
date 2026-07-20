@@ -15,6 +15,9 @@ use sui::display_registry::DisplayRegistry;
 use enclave::enclave::{Self, Enclave};
 use attestations::attestations::{Registry, attest};
 
+#[test_only]
+use sui::test_scenario;
+
 #[error(code = 0)]
 const EBadSignature: vector<u8> =
     b"enclave signature does not verify against the registered enclave";
@@ -126,4 +129,76 @@ fun signing_bytes_match_rust() {
     let expected =
         x"000068e5cf8b010000000000000000000000000000000000000000000000000000000000000000002a036162631c68747470733a2f2f6578616d706c652e636f6d2f7265706f2e67697403706b67086465616462656566";
     assert!(sui::bcs::to_bytes(&msg) == expected);
+}
+
+#[test]
+/// `attest_source` accepts a payload correctly signed by a registered enclave
+/// and mints the attestation. The `Enclave<SourceVerifier>` is fabricated with
+/// the fixed test pubkey, and the signature is the matching one emitted by the
+/// enclave app's `signing_bytes` test over the same payload.
+fun attest_source_accepts_valid_signature() {
+    let alice = @0xA11CE;
+    let mut scenario = test_scenario::begin(alice);
+    attestations::attestations::init_for_testing(scenario.ctx());
+    let enclave = enclave::new_enclave_for_testing<SourceVerifier>(
+        x"d04a166e8dcd71127be0012f3e882c9b8c355af7d43dd98f8200b69eb17e312f",
+        scenario.ctx(),
+    );
+
+    scenario.next_tx(alice);
+    let registry: Registry = scenario.take_shared();
+    let payload = SourceVerification {
+        pkg_id: object::id_from_address(@0x2a),
+        source_hash: b"abc",
+        git_url: b"https://example.com/repo.git".to_string(),
+        subdir: b"pkg".to_string(),
+        git_sha: b"deadbeef".to_string(),
+    };
+    let _ = attest_source(
+        object::id(&registry),
+        &enclave,
+        payload,
+        1_700_000_000_000,
+        x"2fb9ee19cada9ef00aaccd99cde5eb715fd82dbe1ba48d48826053dce7bce6a9ad60856a16b32c1b885cc2dc85532d5033b0922bedac3ff8746984962e441e04",
+        scenario.ctx(),
+    );
+
+    test_scenario::return_shared(registry);
+    enclave::destroy(enclave);
+    scenario.end();
+}
+
+#[test]
+#[expected_failure(abort_code = EBadSignature)]
+/// A signature that doesn't verify against the enclave's key is rejected.
+fun attest_source_rejects_bad_signature() {
+    let alice = @0xA11CE;
+    let mut scenario = test_scenario::begin(alice);
+    attestations::attestations::init_for_testing(scenario.ctx());
+    let enclave = enclave::new_enclave_for_testing<SourceVerifier>(
+        x"d04a166e8dcd71127be0012f3e882c9b8c355af7d43dd98f8200b69eb17e312f",
+        scenario.ctx(),
+    );
+
+    scenario.next_tx(alice);
+    let registry: Registry = scenario.take_shared();
+    let payload = SourceVerification {
+        pkg_id: object::id_from_address(@0x2a),
+        source_hash: b"abc",
+        git_url: b"https://example.com/repo.git".to_string(),
+        subdir: b"pkg".to_string(),
+        git_sha: b"deadbeef".to_string(),
+    };
+    let _ = attest_source(
+        object::id(&registry),
+        &enclave,
+        payload,
+        1_700_000_000_000,
+        x"00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+        scenario.ctx(),
+    );
+
+    test_scenario::return_shared(registry);
+    enclave::destroy(enclave);
+    scenario.end();
 }

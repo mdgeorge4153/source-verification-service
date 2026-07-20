@@ -235,3 +235,28 @@ fn path_str(p: &Path) -> Result<&str, EnclaveError> {
 fn err(msg: impl Into<String>) -> EnclaveError {
     EnclaveError::GenericError(msg.into())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::common::IntentMessage;
+    use fastcrypto::encoding::{Encoding, Hex};
+
+    /// Prints the BCS signing bytes for a fixed `SourceVerification` vector, to
+    /// pin against the Move `source_verification` package's byte-test.
+    #[test]
+    fn signing_bytes() {
+        let mut pkg_id = [0u8; 32];
+        pkg_id[31] = 0x2a;
+        let payload = SourceVerification {
+            pkg_id,
+            source_hash: b"abc".to_vec(),
+            git_url: "https://example.com/repo.git".to_string(),
+            subdir: "pkg".to_string(),
+            git_sha: "deadbeef".to_string(),
+        };
+        let msg = IntentMessage::new(payload, 1_700_000_000_000, IntentScope::SourceVerification as u8);
+        let bytes = bcs::to_bytes(&msg).expect("bcs");
+        println!("SIGNING_BYTES_HEX={}", Hex::encode(&bytes));
+    }
+}

@@ -1,0 +1,7 @@
+[package]
+name = "source_verification"
+edition = "2024"
+
+[dependencies]
+enclave = { local = "../enclave" }
+attestations = { git = "https://github.com/MystenLabs/attestations.git", subdir = "packages/attestations", rev = "main" }

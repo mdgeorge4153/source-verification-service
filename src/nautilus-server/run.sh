@@ -65,10 +65,25 @@ python3 /traffic_forwarder.py 127.0.0.66 443 3 8103 &
 # MOVE_HOME inside, so downloaded compilers and dependency checkouts are
 # accounted against this cap and removed with the request.
 #
-# SIZE: provisional. Needs to hold one compiler (~210 MB), one source checkout,
-# one build tree, and -- for packages published by older releases, whose package
-# system clones whole dependency repositories -- those clones too. Measure the
-# worst case before trusting this number.
+# SIZE: measured. One request needs a compiler (~135-210 MB depending on
+# release), one dependency checkout, and a source tree. The checkout dominates
+# and depends on which package system the publishing release used:
+#
+#   sui 1.30.1  800 MB   old system: whole-repository clone
+#   sui 1.45.3  715 MB   old system
+#   sui 1.60.1  296 MB   old system
+#   sui 1.75.2   53 MB   new system: sparse, shallow
+#
+# So ~1.2 GB for a realistic worst case, and 6G leaves room for a package with
+# several old-style dependencies. tmpfs consumes RAM only as it is written, so a
+# generous cap costs nothing until used -- but it only protects if the enclave
+# has memory to spare above it. Run the enclave with at least 12G
+# (`make run MEMORY=12288M`); the allocator default of 3072 MiB is below this cap
+# and would OOM before ENOSPC, defeating the point.
+#
+# Those figures accumulate per distinct framework revision, which is why each
+# request gets its own MOVE_HOME below rather than sharing one: three old
+# toolchains sharing a cache reached 1.8 GB, and the release history is long.
 mkdir -p /verify
 mount -t tmpfs -o size=6G,mode=0700 tmpfs /verify
 export TMPDIR=/verify

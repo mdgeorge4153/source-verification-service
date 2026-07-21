@@ -100,7 +100,7 @@ pub async fn process_data(
     // recorded in the source's Published.toml for this env. What it compared
     // against, and what compiled it, come back from verify-source itself.
     let source_hash = hash_dir(&package_dir)?;
-    let verified = run_verify_source(&package_dir, &req.build_env)?;
+    let verified = run_verify_source(&package_dir, &req.build_env, &workdir.path.join("move"))?;
     let toolchain = std::fs::read(&verified.binary_path)
         .map_err(|e| err(format!("read toolchain {:?}: {e}", verified.binary_path)))?;
 
@@ -155,9 +155,11 @@ fn git_clone_checkout(url: &str, rev: &str, dest: &Path) -> Result<(), EnclaveEr
 
 /// Resolve the checked-out commit to its full SHA.
 fn git_rev_parse(dir: &Path) -> Result<String, EnclaveError> {
-    Ok(output("git", &["-C", path_str(dir)?, "rev-parse", "HEAD"])?
-        .trim()
-        .to_string())
+    Ok(
+        output("git", &["-C", path_str(dir)?, "rev-parse", "HEAD"], &[])?
+            .trim()
+            .to_string(),
+    )
 }
 
 /// What `verify-source` reports on success, from its `--json` output.
@@ -181,9 +183,17 @@ struct VerifiedMetadata {
 /// means the source compiles to the on-chain bytecode + linkage recorded in the
 /// package's `Published.toml` for `<env>`. Returns what it verified against and
 /// with. `SUI_BIN` overrides the binary (defaults to `sui` on PATH).
+///
+/// `move_home` is this request's alone, so the compiler and the dependency
+/// checkouts it downloads are removed with the workdir. That matters most for
+/// packages published by older releases, whose package system clones whole
+/// dependency repositories rather than sparse, shallow ones — into a filesystem
+/// that is RAM. Per-request also means no cache is shared between requests, so
+/// the eviction policy has nothing to race with here.
 fn run_verify_source(
     package_dir: &Path,
     build_env: &str,
+    move_home: &Path,
 ) -> Result<VerifiedMetadata, EnclaveError> {
     let sui = std::env::var("SUI_BIN").unwrap_or_else(|_| "sui".to_string());
     let stdout = output(
@@ -196,6 +206,7 @@ fn run_verify_source(
             "--json",
             path_str(package_dir)?,
         ],
+        &[("MOVE_HOME", path_str(move_home)?)],
     )?;
     serde_json::from_str(&stdout)
         .map_err(|e| err(format!("parse verify-source --json output: {e}: {stdout}")))
@@ -254,10 +265,12 @@ fn run(bin: &str, args: &[&str]) -> Result<(), EnclaveError> {
     }
 }
 
-/// Run a command and capture stdout, erroring with its output on non-zero exit.
-fn output(bin: &str, args: &[&str]) -> Result<String, EnclaveError> {
+/// Run a command with `envs` set, capturing stdout and erroring with its output
+/// on non-zero exit.
+fn output(bin: &str, args: &[&str], envs: &[(&str, &str)]) -> Result<String, EnclaveError> {
     let out = Command::new(bin)
         .args(args)
+        .envs(envs.iter().copied())
         .output()
         .map_err(|e| err(format!("failed to spawn {bin}: {e}")))?;
     if out.status.success() {

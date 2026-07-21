@@ -52,6 +52,27 @@ python3 /traffic_forwarder.py 127.0.0.66 443 3 8103 &
 
 
 
+# Scratch space for verification, on a tmpfs with a fixed size.
+#
+# The enclave's root filesystem is the unpacked initramfs -- RAM, and unbounded:
+# a runaway download there consumes enclave memory until the kernel OOM-kills
+# something, taking down the enclave, its ephemeral key, and its onchain
+# registration with it. A sized tmpfs turns that into ENOSPC, which fails one
+# request. Verification is the only thing that writes at any scale, and it is
+# serialized, so this bounds the whole enclave's working set.
+#
+# TMPDIR is what sends the server's scratch here; it puts each request's
+# MOVE_HOME inside, so downloaded compilers and dependency checkouts are
+# accounted against this cap and removed with the request.
+#
+# SIZE: provisional. Needs to hold one compiler (~210 MB), one source checkout,
+# one build tree, and -- for packages published by older releases, whose package
+# system clones whole dependency repositories -- those clones too. Measure the
+# worst case before trusting this number.
+mkdir -p /verify
+mount -t tmpfs -o size=6G,mode=0700 tmpfs /verify
+export TMPDIR=/verify
+
 # Listens on Local VSOCK Port 3000 and forwards to localhost 3000
 socat VSOCK-LISTEN:3000,reuseaddr,fork TCP:localhost:3000 &
 

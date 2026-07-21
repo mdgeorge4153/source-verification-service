@@ -16,7 +16,7 @@ use fastcrypto::encoding::{Encoding, Hex};
 use fastcrypto::hash::{Blake2b256, HashFunction, Sha256};
 use serde::{Deserialize, Serialize};
 use serde_repr::{Deserialize_repr, Serialize_repr};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
 
@@ -81,20 +81,21 @@ pub async fn process_data(
     let package_dir = clone.join(&req.subdir);
 
     // Hash the pristine source, then verify it against the on-chain bytecode
-    // recorded in the source's Published.toml for this env.
+    // recorded in the source's Published.toml for this env. What it compared
+    // against, and what compiled it, come back from verify-source itself.
     let source_hash = hash_dir(&package_dir)?;
-    run_verify_source(&package_dir, &req.build_env)?;
-    let publication = publication(&package_dir, &req.build_env)?;
-    let toolchain_digest = toolchain_digest(&publication.toolchain_version)?;
+    let verified = run_verify_source(&package_dir, &req.build_env)?;
+    let toolchain = std::fs::read(&verified.binary_path)
+        .map_err(|e| err(format!("read toolchain {:?}: {e}", verified.binary_path)))?;
 
     let payload = SourceVerification {
-        pkg_id: publication.pkg_id,
+        pkg_id: parse_pkg_id(&verified.published_at)?,
         source_hash,
         git_url: req.git_url,
         subdir: req.subdir,
         git_sha,
-        toolchain_version: publication.toolchain_version,
-        toolchain_digest,
+        toolchain_version: verified.toolchain_version,
+        toolchain_digest: Sha256::digest(toolchain).digest.to_vec(),
     };
     let _ = std::fs::remove_dir_all(&workdir);
     Ok(Json(to_signed_response(
@@ -108,10 +109,10 @@ pub async fn process_data(
 /// Parse a (optionally `0x`-prefixed) 32-byte hex package id.
 fn parse_pkg_id(s: &str) -> Result<[u8; 32], EnclaveError> {
     let bytes = Hex::decode(s.strip_prefix("0x").unwrap_or(s))
-        .map_err(|e| err(format!("bad on_chain_id: {e}")))?;
+        .map_err(|e| err(format!("bad id {s}: {e}")))?;
     bytes
         .try_into()
-        .map_err(|_| err("on_chain_id must be 32 bytes"))
+        .map_err(|_| err(format!("id {s} is not 32 bytes")))
 }
 
 /// Clone `url` into `dest` and check out `rev`.
@@ -128,100 +129,45 @@ fn git_rev_parse(dir: &Path) -> Result<String, EnclaveError> {
         .to_string())
 }
 
-/// Run `sui client verify-source --build-env <env> <dir>`; a zero exit means the
-/// source compiles to the on-chain bytecode + linkage recorded in the package's
-/// `Published.toml` for `<env>`. `SUI_BIN` overrides the binary (defaults to
-/// `sui` on PATH).
-fn run_verify_source(package_dir: &Path, build_env: &str) -> Result<(), EnclaveError> {
+/// What `verify-source` reports on success, from its `--json` output.
+///
+/// Deliberately not derived from the package's own `Published.toml`: the address
+/// compared against and the compiler used are decisions `verify-source` makes,
+/// including precedence rules this app would otherwise have to reproduce and keep
+/// in step. It reports a superset of these fields; the rest are ignored.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct VerifiedMetadata {
+    /// The on-chain address whose bytecode the rebuild was compared against.
+    published_at: String,
+    /// The release the source was rebuilt with.
+    toolchain_version: String,
+    /// The `sui` binary that performed the rebuild.
+    binary_path: PathBuf,
+}
+
+/// Run `sui client verify-source --build-env <env> --json <dir>`; a zero exit
+/// means the source compiles to the on-chain bytecode + linkage recorded in the
+/// package's `Published.toml` for `<env>`. Returns what it verified against and
+/// with. `SUI_BIN` overrides the binary (defaults to `sui` on PATH).
+fn run_verify_source(
+    package_dir: &Path,
+    build_env: &str,
+) -> Result<VerifiedMetadata, EnclaveError> {
     let sui = std::env::var("SUI_BIN").unwrap_or_else(|_| "sui".to_string());
-    run(
+    let stdout = output(
         &sui,
         &[
             "client",
             "verify-source",
             "--build-env",
             build_env,
+            "--json",
             path_str(package_dir)?,
         ],
-    )
-}
-
-/// What the package's committed `Published.toml` records for one environment.
-struct Publication {
-    /// The verified on-chain package id (`published-at`).
-    pkg_id: [u8; 32],
-    /// The release that published it (`toolchain-version`), and so the one
-    /// `verify-source` rebuilds with.
-    toolchain_version: String,
-}
-
-/// Read the `[published.<env>]` entry of the package's committed `Published.toml`.
-///
-/// Errors if either field is missing. A missing `toolchain-version` means the
-/// package was published before releases recorded one (roughly pre-v1.23), so
-/// `verify-source` would fall back to the legacy `Move.lock`; rather than
-/// reproduce that precedence here, such packages are refused, since the
-/// attestation must name the compiler it trusted.
-fn publication(package_dir: &Path, env: &str) -> Result<Publication, EnclaveError> {
-    let toml = std::fs::read_to_string(package_dir.join("Published.toml"))
-        .map_err(|e| err(format!("read Published.toml: {e}")))?;
-    let header = format!("[published.{env}]");
-    let (mut pkg_id, mut toolchain_version) = (None, None);
-    let mut in_section = false;
-    for line in toml.lines() {
-        let line = line.trim();
-        if line.starts_with('[') {
-            in_section = line == header;
-        } else if in_section {
-            if let Some(rest) = line.strip_prefix("published-at") {
-                pkg_id = Some(parse_pkg_id(value_of(rest))?);
-            } else if let Some(rest) = line.strip_prefix("toolchain-version") {
-                toolchain_version = Some(value_of(rest).to_string());
-            }
-        }
-    }
-    match (pkg_id, toolchain_version) {
-        (Some(pkg_id), Some(toolchain_version)) => Ok(Publication {
-            pkg_id,
-            toolchain_version,
-        }),
-        (None, _) => Err(err(format!(
-            "no published-at for env '{env}' in Published.toml"
-        ))),
-        (_, None) => Err(err(format!(
-            "no toolchain-version for env '{env}' in Published.toml"
-        ))),
-    }
-}
-
-/// The value side of a `key = "value"` TOML line, given everything after the key.
-fn value_of(rest: &str) -> &str {
-    rest.trim_start_matches([' ', '=']).trim().trim_matches('"')
-}
-
-/// sha256 of the compiler binary `verify-source` used for `version`, read from
-/// the toolchain cache it populates (`$MOVE_HOME/binaries/<version>`).
-///
-/// Errors if the cache has no entry, which happens when `verify-source` reuses
-/// its own executable because `version` matches its build. Reporting the digest
-/// of a *downloaded* compiler and of the verifier's own are different claims, so
-/// that case is refused rather than conflated; resolving it properly means having
-/// `verify-source` report the binary it used instead of inferring it here.
-fn toolchain_digest(version: &str) -> Result<Vec<u8>, EnclaveError> {
-    let move_home = match std::env::var("MOVE_HOME") {
-        Ok(home) => std::path::PathBuf::from(home),
-        Err(_) => std::path::PathBuf::from(std::env::var("HOME").map_err(|_| err("no HOME"))?)
-            .join(".move"),
-    };
-    let binary = move_home
-        .join("binaries")
-        .join(version)
-        .join("target")
-        .join("release")
-        .join("sui");
-    let bytes = std::fs::read(&binary)
-        .map_err(|e| err(format!("read cached toolchain {binary:?}: {e}")))?;
-    Ok(Sha256::digest(bytes).digest.to_vec())
+    )?;
+    serde_json::from_str(&stdout)
+        .map_err(|e| err(format!("parse verify-source --json output: {e}: {stdout}")))
 }
 
 /// blake2b256 over a lexicographically-sorted manifest of the package directory:
@@ -331,6 +277,29 @@ mod tests {
     use super::*;
     use crate::common::IntentMessage;
     use fastcrypto::encoding::{Encoding, Hex};
+
+    /// Pins the `verify-source --json` contract this app parses. Fields it does
+    /// not need (here `originalId`) must be tolerated, not rejected.
+    #[test]
+    fn parses_verify_source_json() {
+        let json = r#"{
+            "originalId": "0x0e735f8c93a95722efd73521aca7a7652c0bb71ed1daf41b26dfd7d1ff71f748",
+            "publishedAt": "0x0e735f8c93a95722efd73521aca7a7652c0bb71ed1daf41b26dfd7d1ff71f748",
+            "toolchainVersion": "1.71.1",
+            "binaryPath": "/root/.move/binaries/1.71.1/target/release/sui"
+        }"#;
+
+        let m: VerifiedMetadata = serde_json::from_str(json).expect("parses");
+        assert_eq!(m.toolchain_version, "1.71.1");
+        assert_eq!(
+            m.binary_path,
+            PathBuf::from("/root/.move/binaries/1.71.1/target/release/sui")
+        );
+        assert_eq!(
+            parse_pkg_id(&m.published_at).expect("id")[..4],
+            [0x0e, 0x73, 0x5f, 0x8c]
+        );
+    }
 
     /// Prints the BCS signing bytes for a fixed `SourceVerification` vector, to
     /// pin against the Move `source_verification` package's byte-test.

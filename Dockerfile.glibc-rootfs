@@ -1,0 +1,57 @@
+# The enclave userland as a plain container, for testing prebuilt binaries
+# without building and booting an EIF.
+#
+# This mirrors the package set the Containerfile puts into the initramfs, so a
+# binary that runs here will run in the enclave. It exists because the EIF
+# round trip is slow and gives poor diagnostics: a binary that cannot find its
+# loader simply fails to start, with nothing on the console.
+#
+# Used to validate the glibc layer: an official (Ubuntu-built) `sui` release
+# runs unmodified in this rootfs, and a full `verify-source` of a mainnet
+# package succeeds inside it, including downloading and executing the historical
+# toolchain the publication records.
+#
+# Deliberately NOT digest-pinned, unlike the Containerfile. This image is never
+# measured and never attested to -- pinning it would imply a guarantee it does
+# not provide. Pin the Containerfile; treat this as a dev aid.
+#
+#   cp /path/to/sui .            # the binary under test, into the build context
+#   docker build -f Dockerfile.glibc-rootfs -t glibc-rootfs .
+#   docker run --rm -it glibc-rootfs /bin/sh
+#
+# Inside, set the environment run.sh would have set:
+#   export PATH=/bin:/sbin:/usr/bin:/usr/sbin:/
+#   export SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
+
+FROM stagex/core-busybox AS busybox
+FROM stagex/core-musl AS musl
+FROM stagex/user-glibc AS glibc
+FROM stagex/core-cross-x86_64-gnu-gcc AS gnugcc
+FROM stagex/core-git AS git
+FROM stagex/core-zlib AS zlib
+FROM stagex/core-openssl AS openssl
+FROM stagex/core-libzstd AS zstd
+FROM stagex/core-curl AS curl
+FROM stagex/core-ca-certificates AS ca
+
+FROM scratch
+COPY --from=busybox . /
+COPY --from=musl . /
+# glibc, plus the GNU-targeted C++/unwind runtimes. These must come from
+# core-cross-x86_64-gnu-gcc under lib64/ -- core-gcc's are musl-targeted and
+# will not load into a glibc process. Do NOT add a /lib64 symlink: core-busybox
+# already provides a merged-usr lib64 -> usr/lib, and writing through it
+# replaces the loader with a link to itself.
+COPY --from=glibc . /
+COPY --from=gnugcc /opt/cross/x86_64-linux-gnu/lib64/libstdc++.so.6* /usr/lib/
+COPY --from=gnugcc /opt/cross/x86_64-linux-gnu/lib64/libgcc_s.so.1 /usr/lib/
+# git needs zlib; git-remote-https needs curl, which needs openssl and the CA
+# bundle. zstd is needed to clone repositories that use it.
+COPY --from=zlib . /
+COPY --from=openssl . /
+COPY --from=zstd . /
+COPY --from=git . /
+COPY --from=curl . /
+COPY --from=ca . /
+
+COPY sui /sui

@@ -26,6 +26,12 @@ FROM stagex/user-cpio@sha256:9c8bf39001eca8a71d5617b46f8c9b4f7426db41a052f198d73
 FROM stagex/user-socat@sha256:4d1b7a403eba65087a3f69200d2644d01b63f0ea81ef171cedc17de490c8c9a0 AS user-socat
 FROM stagex/user-jq@sha256:0c75672e97f54b83661aaa498e053340305e79cdc2004a40d92b7bf5ce906e9c AS user-jq
 FROM stagex/user-nit@sha256:60b6eef4534ea6ea78d9f29e4c7feb27407b615424f20ad8943d807191688be7 AS user-nit
+# glibc runtime, so the enclave can exec prebuilt (ubuntu-built) binaries such as
+# the `sui` toolchain the source verifier downloads. `nautilus-server` itself is
+# musl-static and unaffected.
+# TODO: pin both by @sha256 once a build has resolved the digests.
+FROM stagex/user-glibc AS user-glibc
+FROM stagex/core-cross-x86_64-gnu-gcc AS gnu-gcc
 
 FROM scratch AS base
 COPY --from=core-busybox . /
@@ -71,6 +77,16 @@ COPY --from=core-busybox /bin/sh initramfs/sh
 COPY --from=user-jq /bin/jq initramfs
 COPY --from=user-socat /bin/socat . initramfs
 COPY --from=user-nit /bin/init initramfs
+# --- glibc runtime for prebuilt binaries (see the FROM aliases above) ---
+# StageX's glibc installs into /usr/lib/x86_64-linux-gnu and deliberately removes
+# /lib64, but ubuntu-built binaries hardcode their ELF interpreter as
+# /lib64/ld-linux-x86-64.so.2 — so the symlink below is what makes them exec at
+# all. Without it you get a bare "no such file" despite glibc being present.
+COPY --from=user-glibc . initramfs
+COPY --from=gnu-gcc /opt/cross/x86_64-linux-gnu/lib/libstdc++.so.6* initramfs/usr/lib/x86_64-linux-gnu/
+COPY --from=gnu-gcc /opt/cross/x86_64-linux-gnu/lib/libgcc_s.so.1 initramfs/usr/lib/x86_64-linux-gnu/
+RUN mkdir -p initramfs/lib64 \
+ && ln -sf /usr/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2 initramfs/lib64/ld-linux-x86-64.so.2
 RUN cp /src/nautilus-server/target/${TARGET}/release/nautilus-server initramfs
 RUN cp /src/nautilus-server/traffic_forwarder.py initramfs/
 RUN cp /src/nautilus-server/run.sh initramfs/

@@ -12,6 +12,8 @@ sleep 5
 # No secrets: create empty secrets.json for compatibility
 echo '{}' > secrets.json
 
+# No secrets: create empty secrets.json for compatibility
+
 # This section will be populated by configure_enclave.sh based on secret configuration
 
 cat secrets.json | socat - VSOCK-CONNECT:$ENCLAVE_CID:7777

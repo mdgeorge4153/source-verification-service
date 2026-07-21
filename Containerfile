@@ -78,15 +78,17 @@ COPY --from=user-jq /bin/jq initramfs
 COPY --from=user-socat /bin/socat . initramfs
 COPY --from=user-nit /bin/init initramfs
 # --- glibc runtime for prebuilt binaries (see the FROM aliases above) ---
-# StageX's glibc installs into /usr/lib/x86_64-linux-gnu and deliberately removes
-# /lib64, but ubuntu-built binaries hardcode their ELF interpreter as
-# /lib64/ld-linux-x86-64.so.2 — so the symlink below is what makes them exec at
-# all. Without it you get a bare "no such file" despite glibc being present.
+# Ubuntu-built binaries hardcode their ELF interpreter as
+# /lib64/ld-linux-x86-64.so.2, and that already resolves here: core-busybox
+# brings a merged-usr `lib64 -> usr/lib` symlink and user-glibc puts the real
+# loader at /usr/lib/ld-linux-x86-64.so.2. Do NOT add a /lib64 symlink of your
+# own -- it writes *through* lib64 -> usr/lib and replaces the loader with a
+# self-reference ("too many levels of symbolic links").
+# libstdc++/libgcc_s must be the GNU-targeted builds under lib64/; core-gcc's are
+# musl-targeted and will not serve a glibc binary.
 COPY --from=user-glibc . initramfs
-COPY --from=gnu-gcc /opt/cross/x86_64-linux-gnu/lib/libstdc++.so.6* initramfs/usr/lib/x86_64-linux-gnu/
-COPY --from=gnu-gcc /opt/cross/x86_64-linux-gnu/lib/libgcc_s.so.1 initramfs/usr/lib/x86_64-linux-gnu/
-RUN mkdir -p initramfs/lib64 \
- && ln -sf /usr/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2 initramfs/lib64/ld-linux-x86-64.so.2
+COPY --from=gnu-gcc /opt/cross/x86_64-linux-gnu/lib64/libstdc++.so.6* initramfs/usr/lib/
+COPY --from=gnu-gcc /opt/cross/x86_64-linux-gnu/lib64/libgcc_s.so.1 initramfs/usr/lib/
 RUN cp /src/nautilus-server/target/${TARGET}/release/nautilus-server initramfs
 RUN cp /src/nautilus-server/traffic_forwarder.py initramfs/
 RUN cp /src/nautilus-server/run.sh initramfs/

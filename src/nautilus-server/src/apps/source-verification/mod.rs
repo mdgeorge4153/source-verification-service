@@ -260,7 +260,7 @@ fn collect_files(root: &Path, dir: &Path, out: &mut Vec<String>) -> Result<(), E
     Ok(())
 }
 
-/// Run a command, returning an error (with stderr) on non-zero exit.
+/// Run a command, returning an error carrying its output on non-zero exit.
 fn run(bin: &str, args: &[&str]) -> Result<(), EnclaveError> {
     let out = Command::new(bin)
         .args(args)
@@ -272,12 +272,12 @@ fn run(bin: &str, args: &[&str]) -> Result<(), EnclaveError> {
         Err(err(format!(
             "{bin} {} failed: {}",
             args.join(" "),
-            String::from_utf8_lossy(&out.stderr)
+            described(&out)
         )))
     }
 }
 
-/// Run a command and capture stdout, erroring (with stderr) on non-zero exit.
+/// Run a command and capture stdout, erroring with its output on non-zero exit.
 fn output(bin: &str, args: &[&str]) -> Result<String, EnclaveError> {
     let out = Command::new(bin)
         .args(args)
@@ -286,10 +286,26 @@ fn output(bin: &str, args: &[&str]) -> Result<String, EnclaveError> {
     if out.status.success() {
         Ok(String::from_utf8_lossy(&out.stdout).into_owned())
     } else {
-        Err(err(format!(
-            "{bin} failed: {}",
-            String::from_utf8_lossy(&out.stderr)
-        )))
+        Err(err(format!("{bin} failed: {}", described(&out))))
+    }
+}
+
+/// Both output streams of a failed command, labelled.
+///
+/// Both, because a failed verification is the case a requestor most needs to
+/// read, and `verify-source` splits its reporting across the two: progress and
+/// the `--json` result go to stdout, warnings and the rebuild's own diagnostics
+/// to stderr. Which stream carries the detail of a given failure is not worth
+/// depending on. This is debugging output only — it is returned unsigned, so it
+/// carries no more authority than the server sending it.
+fn described(out: &std::process::Output) -> String {
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    match (stdout.trim().is_empty(), stderr.trim().is_empty()) {
+        (true, true) => format!("no output ({})", out.status),
+        (true, false) => format!("{}\n{stderr}", out.status),
+        (false, true) => format!("{}\n{stdout}", out.status),
+        (false, false) => format!("{}\nstdout:\n{stdout}\nstderr:\n{stderr}", out.status),
     }
 }
 

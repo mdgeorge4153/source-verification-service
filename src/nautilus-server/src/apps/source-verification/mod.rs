@@ -19,6 +19,7 @@ use serde_repr::{Deserialize_repr, Serialize_repr};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
+use tokio::sync::Mutex;
 
 /// Intent scope for the source-verification signature. Must match the on-chain
 /// verifier's scope.
@@ -66,16 +67,31 @@ pub struct SourceVerification {
     pub toolchain_digest: Vec<u8>,
 }
 
+/// Admits one verification at a time.
+///
+/// Two reasons, either sufficient. A verification holds a source checkout, a
+/// build tree, and a ~200 MB compiler in a filesystem that is RAM, so running
+/// them concurrently multiplies the scarcest resource the enclave has — and
+/// exhausting it kills the enclave rather than the request, losing the ephemeral
+/// key and forcing re-registration. Separately, the compiler cache evicts
+/// least-recently-used entries on install, so a concurrent verification can
+/// delete the binary this one is about to hash.
+static VERIFY_LOCK: Mutex<()> = Mutex::const_new(());
+
 /// Clone the source, hash it, verify it against the on-chain package, and — on a
-/// match — return a signed `SourceVerification`.
+/// match — return a signed `SourceVerification`. Verifications are serialized;
+/// see `VERIFY_LOCK`.
 pub async fn process_data(
     State(state): State<Arc<AppState>>,
     Json(request): Json<ProcessDataRequest<VerifyRequest>>,
 ) -> Result<Json<ProcessedDataResponse<IntentMessage<SourceVerification>>>, EnclaveError> {
     let req = request.payload;
+    let _guard = VERIFY_LOCK.lock().await;
 
-    let workdir = std::env::temp_dir().join(format!("srcverif-{}", uuid::Uuid::new_v4()));
-    let clone = workdir.join("repo");
+    let workdir = Workdir {
+        path: std::env::temp_dir().join(format!("srcverif-{}", uuid::Uuid::new_v4())),
+    };
+    let clone = workdir.path.join("repo");
     git_clone_checkout(&req.git_url, &req.git_rev, &clone)?;
     let git_sha = git_rev_parse(&clone)?;
     let package_dir = clone.join(&req.subdir);
@@ -97,13 +113,28 @@ pub async fn process_data(
         toolchain_version: verified.toolchain_version,
         toolchain_digest: Sha256::digest(toolchain).digest.to_vec(),
     };
-    let _ = std::fs::remove_dir_all(&workdir);
     Ok(Json(to_signed_response(
         &state.eph_kp,
         payload,
         now_ms()?,
         IntentScope::SourceVerification as u8,
     )))
+}
+
+/// A scratch directory removed when dropped.
+///
+/// On drop rather than at the end of a request because a verification can fail
+/// at several points, and a leaked checkout and build tree stay in the enclave's
+/// RAM-backed filesystem for the life of the enclave. Failures are the common
+/// case for a service that verifies whatever it is asked to.
+struct Workdir {
+    path: PathBuf,
+}
+
+impl Drop for Workdir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.path);
+    }
 }
 
 /// Parse a (optionally `0x`-prefixed) 32-byte hex package id.

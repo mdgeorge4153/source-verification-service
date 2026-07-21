@@ -13,7 +13,7 @@ use crate::EnclaveError;
 use axum::extract::State;
 use axum::Json;
 use fastcrypto::encoding::{Encoding, Hex};
-use fastcrypto::hash::{Blake2b256, HashFunction};
+use fastcrypto::hash::{Blake2b256, HashFunction, Sha256};
 use serde::{Deserialize, Serialize};
 use serde_repr::{Deserialize_repr, Serialize_repr};
 use std::path::Path;
@@ -47,6 +47,14 @@ pub struct VerifyRequest {
 /// `source_hash`. `source_hash` (blake2b256) is the authoritative identifier;
 /// the git fields are informational provenance only — git's SHA-1 is not
 /// collision-resistant and must not be relied on for integrity.
+///
+/// `toolchain_version` and `toolchain_digest` name the compiler that produced the
+/// comparison. They are load-bearing, not informational: the compiler is fetched
+/// at run time and so is *not* covered by the enclave's PCRs, which measure only
+/// the image. Without them the attestation would assert a rebuild without saying
+/// what performed it, and a substituted release would be indistinguishable.
+/// `toolchain_digest` is sha256 of the compiler binary as executed, so a consumer
+/// can check it against the corresponding official release.
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct SourceVerification {
     pub pkg_id: [u8; 32],
@@ -54,6 +62,8 @@ pub struct SourceVerification {
     pub git_url: String,
     pub subdir: String,
     pub git_sha: String,
+    pub toolchain_version: String,
+    pub toolchain_digest: Vec<u8>,
 }
 
 /// Clone the source, hash it, verify it against the on-chain package, and — on a
@@ -74,14 +84,17 @@ pub async fn process_data(
     // recorded in the source's Published.toml for this env.
     let source_hash = hash_dir(&package_dir)?;
     run_verify_source(&package_dir, &req.build_env)?;
-    let pkg_id = published_at(&package_dir, &req.build_env)?;
+    let publication = publication(&package_dir, &req.build_env)?;
+    let toolchain_digest = toolchain_digest(&publication.toolchain_version)?;
 
     let payload = SourceVerification {
-        pkg_id,
+        pkg_id: publication.pkg_id,
         source_hash,
         git_url: req.git_url,
         subdir: req.subdir,
         git_sha,
+        toolchain_version: publication.toolchain_version,
+        toolchain_digest,
     };
     let _ = std::fs::remove_dir_all(&workdir);
     Ok(Json(to_signed_response(
@@ -133,12 +146,27 @@ fn run_verify_source(package_dir: &Path, build_env: &str) -> Result<(), EnclaveE
     )
 }
 
-/// The verified on-chain package id: the `published-at` under `[published.<env>]`
-/// in the package's committed `Published.toml`.
-fn published_at(package_dir: &Path, env: &str) -> Result<[u8; 32], EnclaveError> {
+/// What the package's committed `Published.toml` records for one environment.
+struct Publication {
+    /// The verified on-chain package id (`published-at`).
+    pkg_id: [u8; 32],
+    /// The release that published it (`toolchain-version`), and so the one
+    /// `verify-source` rebuilds with.
+    toolchain_version: String,
+}
+
+/// Read the `[published.<env>]` entry of the package's committed `Published.toml`.
+///
+/// Errors if either field is missing. A missing `toolchain-version` means the
+/// package was published before releases recorded one (roughly pre-v1.23), so
+/// `verify-source` would fall back to the legacy `Move.lock`; rather than
+/// reproduce that precedence here, such packages are refused, since the
+/// attestation must name the compiler it trusted.
+fn publication(package_dir: &Path, env: &str) -> Result<Publication, EnclaveError> {
     let toml = std::fs::read_to_string(package_dir.join("Published.toml"))
         .map_err(|e| err(format!("read Published.toml: {e}")))?;
     let header = format!("[published.{env}]");
+    let (mut pkg_id, mut toolchain_version) = (None, None);
     let mut in_section = false;
     for line in toml.lines() {
         let line = line.trim();
@@ -146,12 +174,54 @@ fn published_at(package_dir: &Path, env: &str) -> Result<[u8; 32], EnclaveError>
             in_section = line == header;
         } else if in_section {
             if let Some(rest) = line.strip_prefix("published-at") {
-                let val = rest.trim_start_matches([' ', '=']).trim().trim_matches('"');
-                return parse_pkg_id(val);
+                pkg_id = Some(parse_pkg_id(value_of(rest))?);
+            } else if let Some(rest) = line.strip_prefix("toolchain-version") {
+                toolchain_version = Some(value_of(rest).to_string());
             }
         }
     }
-    Err(err(format!("no published-at for env '{env}' in Published.toml")))
+    match (pkg_id, toolchain_version) {
+        (Some(pkg_id), Some(toolchain_version)) => Ok(Publication {
+            pkg_id,
+            toolchain_version,
+        }),
+        (None, _) => Err(err(format!(
+            "no published-at for env '{env}' in Published.toml"
+        ))),
+        (_, None) => Err(err(format!(
+            "no toolchain-version for env '{env}' in Published.toml"
+        ))),
+    }
+}
+
+/// The value side of a `key = "value"` TOML line, given everything after the key.
+fn value_of(rest: &str) -> &str {
+    rest.trim_start_matches([' ', '=']).trim().trim_matches('"')
+}
+
+/// sha256 of the compiler binary `verify-source` used for `version`, read from
+/// the toolchain cache it populates (`$MOVE_HOME/binaries/<version>`).
+///
+/// Errors if the cache has no entry, which happens when `verify-source` reuses
+/// its own executable because `version` matches its build. Reporting the digest
+/// of a *downloaded* compiler and of the verifier's own are different claims, so
+/// that case is refused rather than conflated; resolving it properly means having
+/// `verify-source` report the binary it used instead of inferring it here.
+fn toolchain_digest(version: &str) -> Result<Vec<u8>, EnclaveError> {
+    let move_home = match std::env::var("MOVE_HOME") {
+        Ok(home) => std::path::PathBuf::from(home),
+        Err(_) => std::path::PathBuf::from(std::env::var("HOME").map_err(|_| err("no HOME"))?)
+            .join(".move"),
+    };
+    let binary = move_home
+        .join("binaries")
+        .join(version)
+        .join("target")
+        .join("release")
+        .join("sui");
+    let bytes = std::fs::read(&binary)
+        .map_err(|e| err(format!("read cached toolchain {binary:?}: {e}")))?;
+    Ok(Sha256::digest(bytes).digest.to_vec())
 }
 
 /// blake2b256 over a lexicographically-sorted manifest of the package directory:
@@ -164,8 +234,7 @@ fn hash_dir(dir: &Path) -> Result<Vec<u8>, EnclaveError> {
     files.sort();
     let mut manifest = Blake2b256::new();
     for rel in files {
-        let content =
-            std::fs::read(dir.join(&rel)).map_err(|e| err(format!("read {rel}: {e}")))?;
+        let content = std::fs::read(dir.join(&rel)).map_err(|e| err(format!("read {rel}: {e}")))?;
         manifest.update(rel.as_bytes());
         manifest.update([0u8]);
         manifest.update(Blake2b256::digest(content).digest);
@@ -180,7 +249,12 @@ fn collect_files(root: &Path, dir: &Path, out: &mut Vec<String>) -> Result<(), E
         if path.is_dir() {
             collect_files(root, &path, out)?;
         } else {
-            out.push(path.strip_prefix(root).unwrap().to_string_lossy().into_owned());
+            out.push(
+                path.strip_prefix(root)
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned(),
+            );
         }
     }
     Ok(())
@@ -254,8 +328,14 @@ mod tests {
             git_url: "https://example.com/repo.git".to_string(),
             subdir: "pkg".to_string(),
             git_sha: "deadbeef".to_string(),
+            toolchain_version: "1.71.1".to_string(),
+            toolchain_digest: b"xyz".to_vec(),
         };
-        let msg = IntentMessage::new(payload, 1_700_000_000_000, IntentScope::SourceVerification as u8);
+        let msg = IntentMessage::new(
+            payload,
+            1_700_000_000_000,
+            IntentScope::SourceVerification as u8,
+        );
         let bytes = bcs::to_bytes(&msg).expect("bcs");
         println!("SIGNING_BYTES_HEX={}", Hex::encode(&bytes));
 

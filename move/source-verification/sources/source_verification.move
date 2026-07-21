@@ -48,6 +48,14 @@ public struct SourceVerifier has drop {}
 /// authoritative identifier; the git fields are informational provenance only —
 /// git's SHA-1 is not collision-resistant. Field order + types are pinned to the
 /// enclave server's Rust `SourceVerification` by a cross-language BCS byte-test.
+///
+/// `toolchain_version` and `toolchain_digest` name the compiler that performed
+/// the rebuild. The enclave downloads that compiler at run time, so it is not
+/// covered by the PCRs in `EnclaveConfig`: the PCRs attest to the image, and
+/// these two fields attest to what the image then fetched and ran.
+/// `toolchain_digest` is sha256 of that binary, so a consumer can check it
+/// against the official release for `toolchain_version` and decide whether to
+/// believe the rebuild.
 #[allow(unused_field)]
 public struct SourceVerification has copy, store, drop {
     pkg_id: ID,
@@ -55,6 +63,8 @@ public struct SourceVerification has copy, store, drop {
     git_url: String,
     subdir: String,
     git_sha: String,
+    toolchain_version: String,
+    toolchain_digest: vector<u8>,
 }
 
 /// Publish-time: mint the enclave `Cap<SourceVerifier>`, create the shared
@@ -124,10 +134,12 @@ fun signing_bytes_match_rust() {
         git_url: b"https://example.com/repo.git".to_string(),
         subdir: b"pkg".to_string(),
         git_sha: b"deadbeef".to_string(),
+        toolchain_version: b"1.71.1".to_string(),
+        toolchain_digest: b"xyz",
     };
     let msg = enclave::create_intent_message(VERIFY_SCOPE, 1_700_000_000_000, payload);
     let expected =
-        x"000068e5cf8b010000000000000000000000000000000000000000000000000000000000000000002a036162631c68747470733a2f2f6578616d706c652e636f6d2f7265706f2e67697403706b67086465616462656566";
+        x"000068e5cf8b010000000000000000000000000000000000000000000000000000000000000000002a036162631c68747470733a2f2f6578616d706c652e636f6d2f7265706f2e67697403706b6708646561646265656606312e37312e310378797a";
     assert!(sui::bcs::to_bytes(&msg) == expected);
 }
 
@@ -153,13 +165,15 @@ fun attest_source_accepts_valid_signature() {
         git_url: b"https://example.com/repo.git".to_string(),
         subdir: b"pkg".to_string(),
         git_sha: b"deadbeef".to_string(),
+        toolchain_version: b"1.71.1".to_string(),
+        toolchain_digest: b"xyz",
     };
     let _ = attest_source(
         object::id(&registry),
         &enclave,
         payload,
         1_700_000_000_000,
-        x"2fb9ee19cada9ef00aaccd99cde5eb715fd82dbe1ba48d48826053dce7bce6a9ad60856a16b32c1b885cc2dc85532d5033b0922bedac3ff8746984962e441e04",
+        x"d13ea677c4a3e33c9ec5010f0724e55fc19edb8518818653ed88b8b85bf62645d5f2b34d3ff972ae10fb65df2413e9aa39c66e45df6c815b9a43e90716c32a0b",
         scenario.ctx(),
     );
 
@@ -188,6 +202,8 @@ fun attest_source_rejects_bad_signature() {
         git_url: b"https://example.com/repo.git".to_string(),
         subdir: b"pkg".to_string(),
         git_sha: b"deadbeef".to_string(),
+        toolchain_version: b"1.71.1".to_string(),
+        toolchain_digest: b"xyz",
     };
     let _ = attest_source(
         object::id(&registry),

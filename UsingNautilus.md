@@ -163,6 +163,41 @@ curl -H 'Content-Type: application/json' -d '{"payload": { "location": "San Fran
 {"response":{"intent":0,"timestamp_ms":1744041600000,"data":{"location":"San Francisco","temperature":13}},"signature":"b75d2d44c4a6b3c676fe087465c0e85206b101e21be6cda4c9ab2fd4ba5c0d8c623bf0166e274c5491a66001d254ce4c8c345b78411fdee7225111960cff250a"}
 ```
 
+### Running prebuilt binaries inside the enclave
+
+If your `process_data` logic shells out to a prebuilt binary (such as a vendor CLI or an official `sui` release), that binary is most likely linked against [glibc](https://www.gnu.org/software/libc/), the standard C library on most Linux distributions (e.g. the `sui` binary). One can add the glibc runtime as a StageX dependency, like the other packages in the `Containerfile`, keeping the build reproducible and covered by the PCRs.
+
+To add the glibc runtime:
+
+1. Add two image aliases alongside the others at the top of the `Containerfile`:
+
+```dockerfile
+FROM stagex/user-glibc@sha256:56bae3d45f62f61c94c679a5ce0a11c8cc5735448916ed65232edffaba25cde2 AS user-glibc
+FROM stagex/core-cross-x86_64-gnu-gcc@sha256:79f4b11f01371aeca88c36c39ff9a5fcdc2e6152dedd2513b2e9026c11fafdc0 AS gnu-gcc
+```
+
+2. Copy the runtime into the initramfs, next to the other `COPY --from=... initramfs` lines:
+
+```dockerfile
+COPY --from=user-glibc . initramfs
+COPY --from=gnu-gcc /opt/cross/x86_64-linux-gnu/lib64/libstdc++.so.6* initramfs/usr/lib/
+COPY --from=gnu-gcc /opt/cross/x86_64-linux-gnu/lib64/libgcc_s.so.1 initramfs/usr/lib/
+```
+
+> [!NOTE]
+> - Take `libstdc++` and `libgcc_s` from `core-cross-x86_64-gnu-gcc` under `lib64/`, not from `core-gcc`, whose copies are musl-targeted and will not load into a glibc process.
+> - Do not add a `/lib64` symlink for the loader. The path `/lib64/ld-linux-x86-64.so.2` already resolves: `core-busybox` provides a `lib64 -> usr/lib` symlink and `user-glibc` installs the loader at `/usr/lib/ld-linux-x86-64.so.2`. Creating `/lib64` writes through the existing symlink and replaces the loader with a link to itself, after which every exec fails with `too many levels of symbolic links`.
+
+3. Check what your binary actually requires. Any additional library is added the same way: a `FROM stagex/...` alias and a `COPY --from=... . initramfs` line. Note that requirements compose. For example, adding `git` also requires `core-zlib`, and using `git` over HTTPS also requires `core-curl`.
+
+```shell
+# Shared libraries the binary needs, and the oldest glibc that satisfies its symbols
+objdump -p ./mybinary | grep NEEDED
+objdump -T ./mybinary | grep -o 'GLIBC_[0-9.]*' | sort -Vu | tail -1
+```
+
+To raise the default 512M enclave memory, use `make run MEMORY=...` if needed. If the binary fetches from external hosts, add them to `allowed_endpoints.yaml`.
+
 ### Troubleshooting
 
 - Traffic forwarder error: Ensure all targeted domains are listed in the `allowed_endpoints.yaml`. The following command can be used to test enclave connectivities to all domains.

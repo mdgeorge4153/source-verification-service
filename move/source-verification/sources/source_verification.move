@@ -85,24 +85,45 @@ fun init(ctx: &mut TxContext) {
 }
 
 /// Verify an enclave-signed `SourceVerification` and record it as an
-/// `Attestation<SourceVerification>` about `payload.pkg_id`. Accepts any
+/// `Attestation<SourceVerification>` about `pkg_id`. Accepts any
 /// `Enclave<SourceVerifier>` registered against the config (permissionless
 /// multi-provider). `registry` is the attestations `Registry` id. Returns the
 /// new attestation's ID.
+///
+/// The payload arrives as fields rather than as a `SourceVerification` because a
+/// programmable transaction can supply only primitives, vectors and a handful of
+/// special types as pure arguments; an arbitrary Move struct is not among them,
+/// so taking the struct by value would make this uncallable. Rebuilding it here
+/// is also what gives the signature check its meaning — the signature is checked
+/// against the fields the caller actually supplied.
 public fun attest_source(
     registry: ID,
     enclave: &Enclave<SourceVerifier>,
-    payload: SourceVerification,
+    pkg_id: ID,
+    source_hash: vector<u8>,
+    git_url: String,
+    subdir: String,
+    git_sha: String,
+    toolchain_version: String,
+    toolchain_digest: vector<u8>,
     timestamp_ms: u64,
     signature: vector<u8>,
     ctx: &mut TxContext,
 ): ID {
-    let subject = payload.pkg_id;
+    let payload = SourceVerification {
+        pkg_id,
+        source_hash,
+        git_url,
+        subdir,
+        git_sha,
+        toolchain_version,
+        toolchain_digest,
+    };
     assert!(
         enclave.verify_signature(VERIFY_SCOPE, timestamp_ms, payload, &signature),
         EBadSignature,
     );
-    attest(registry, internal::permit<SourceVerification>(), subject, payload, ctx)
+    attest(registry, internal::permit<SourceVerification>(), pkg_id, payload, ctx)
 }
 
 /// One-shot setup of the append-only `Display<Attestation<SourceVerification>>`.
@@ -159,19 +180,16 @@ fun attest_source_accepts_valid_signature() {
 
     scenario.next_tx(alice);
     let registry: Registry = scenario.take_shared();
-    let payload = SourceVerification {
-        pkg_id: object::id_from_address(@0x2a),
-        source_hash: b"abc",
-        git_url: b"https://example.com/repo.git".to_string(),
-        subdir: b"pkg".to_string(),
-        git_sha: b"deadbeef".to_string(),
-        toolchain_version: b"1.71.1".to_string(),
-        toolchain_digest: b"xyz",
-    };
     let _ = attest_source(
         object::id(&registry),
         &enclave,
-        payload,
+        object::id_from_address(@0x2a),
+        b"abc",
+        b"https://example.com/repo.git".to_string(),
+        b"pkg".to_string(),
+        b"deadbeef".to_string(),
+        b"1.71.1".to_string(),
+        b"xyz",
         1_700_000_000_000,
         x"d13ea677c4a3e33c9ec5010f0724e55fc19edb8518818653ed88b8b85bf62645d5f2b34d3ff972ae10fb65df2413e9aa39c66e45df6c815b9a43e90716c32a0b",
         scenario.ctx(),
@@ -196,19 +214,16 @@ fun attest_source_rejects_bad_signature() {
 
     scenario.next_tx(alice);
     let registry: Registry = scenario.take_shared();
-    let payload = SourceVerification {
-        pkg_id: object::id_from_address(@0x2a),
-        source_hash: b"abc",
-        git_url: b"https://example.com/repo.git".to_string(),
-        subdir: b"pkg".to_string(),
-        git_sha: b"deadbeef".to_string(),
-        toolchain_version: b"1.71.1".to_string(),
-        toolchain_digest: b"xyz",
-    };
     let _ = attest_source(
         object::id(&registry),
         &enclave,
-        payload,
+        object::id_from_address(@0x2a),
+        b"abc",
+        b"https://example.com/repo.git".to_string(),
+        b"pkg".to_string(),
+        b"deadbeef".to_string(),
+        b"1.71.1".to_string(),
+        b"xyz",
         1_700_000_000_000,
         x"00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
         scenario.ctx(),

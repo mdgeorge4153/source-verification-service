@@ -19,8 +19,7 @@ FROM stagex/core-pkgconf@sha256:52624a89bb8cc684bc0391fcb7770ded2bbcb281e84bdb68
 FROM stagex/core-busybox@sha256:637b1e0d9866807fac94c22d6dc4b2e1f45c8a5ca1113c88172e0324a30c7283 AS core-busybox
 FROM stagex/core-python@sha256:95504b36f4340782f5aa492d68f9a713406391898bf41cd62c9c9b54d6bee3f1 AS core-python
 FROM stagex/core-libzstd@sha256:5382c221194b6d0690eb65ccca01c720a6bd39f92e610dbc0e99ba43f38f3094 AS core-libzstd
-# TODO: pin by @sha256 once a build has resolved the digest.
-FROM stagex/core-curl AS core-curl
+FROM stagex/core-curl@sha256:fa58ff1a1c32677ce3034e69a2ee40081c799d6df68a7b1d5d480501de779030 AS core-curl
 FROM stagex/user-eif_build@sha256:935032172a23772ea1a35c6334aa98aa7b0c46f9e34a040347c7b2a73496ef8a AS user-eif_build
 FROM stagex/user-gen_initramfs@sha256:a87e9a3fa8468d2e08b5abb0a6da4c7a11df22273e2c526cb22e6b131151def8 AS user-gen_initramfs
 FROM stagex/user-linux-nitro@sha256:aa1006d91a7265b33b86160031daad2fdf54ec2663ed5ccbd312567cc9beff2c AS user-linux-nitro
@@ -31,9 +30,8 @@ FROM stagex/user-nit@sha256:60b6eef4534ea6ea78d9f29e4c7feb27407b615424f20ad8943d
 # glibc runtime, so the enclave can exec prebuilt (ubuntu-built) binaries such as
 # the `sui` toolchain the source verifier downloads. `nautilus-server` itself is
 # musl-static and unaffected.
-# TODO: pin both by @sha256 once a build has resolved the digests.
-FROM stagex/user-glibc AS user-glibc
-FROM stagex/core-cross-x86_64-gnu-gcc AS gnu-gcc
+FROM stagex/user-glibc@sha256:56bae3d45f62f61c94c679a5ce0a11c8cc5735448916ed65232edffaba25cde2 AS user-glibc
+FROM stagex/core-cross-x86_64-gnu-gcc@sha256:79f4b11f01371aeca88c36c39ff9a5fcdc2e6152dedd2513b2e9026c11fafdc0 AS gnu-gcc
 
 FROM scratch AS base
 COPY --from=core-busybox . /

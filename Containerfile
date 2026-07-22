@@ -127,6 +127,10 @@ COPY verifier/sui initramfs/sui
 RUN cp /src/nautilus-server/target/${TARGET}/release/nautilus-server initramfs
 RUN cp /src/nautilus-server/traffic_forwarder.py initramfs/
 RUN cp /src/nautilus-server/run.sh initramfs/
+# health_check reads this at runtime from the working directory, so without it
+# the endpoint reports an empty endpoints_status -- looking healthy while having
+# probed nothing, which is worse than no health check at all.
+RUN cp /src/nautilus-server/src/apps/${ENCLAVE_APP}/allowed_endpoints.yaml initramfs/
 
 COPY <<-EOF initramfs/etc/environment
 SSL_CERT_FILE=/ca-certificates.crt

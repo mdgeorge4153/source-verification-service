@@ -102,7 +102,22 @@ COPY --from=core-zlib . initramfs
 COPY --from=core-openssl . initramfs
 COPY --from=core-libzstd . initramfs
 COPY --from=core-curl . initramfs
-COPY --from=core-git . initramfs
+# Only the pieces the verifier needs, NOT the whole package. git ships ~140
+# commands in libexec/git-core as hardlinks to one binary; `COPY` does not
+# preserve hardlinks, so copying the package materialises 141 identical 18.9 MB
+# files -- 2.6 GB of duplicates in a filesystem that is RAM. Every command in
+# that set is a builtin reachable as `git <cmd>`, so the dispatch copies are
+# redundant. The remote helpers are separate binaries and are needed: cloning
+# over HTTPS execs git-remote-https. /usr/share/git-core holds the templates
+# `git clone` requires.
+#
+# Two earlier attempts deduplicated this after the fact, inside the build. Both
+# silently did nothing and still reported success. Not copying the duplicates in
+# the first place cannot fail quietly: a wrong path fails the build outright.
+COPY --from=core-git /usr/bin/git initramfs/usr/bin/git
+COPY --from=core-git /usr/libexec/git-core/git-remote-http initramfs/usr/libexec/git-core/git-remote-http
+COPY --from=core-git /usr/libexec/git-core/git-remote-https initramfs/usr/libexec/git-core/git-remote-https
+COPY --from=core-git /usr/share/git-core initramfs/usr/share/git-core
 COPY --from=core-ca-certificates . initramfs
 # The Move compiler the verifier runs. Baked in rather than downloaded so that it
 # is covered by the PCRs: an enclave that fetched its own verifier at run time
@@ -137,28 +152,18 @@ EOF
 # at run time can load. /usr/share stays: git needs its templates to clone.
 RUN <<-'EOF'
 	set -eux
-	cd /build_cpio/initramfs/usr/libexec/git-core
-	for f in *; do
-	    if [ -f "$f" ] && [ "$f" != git ] && cmp -s "$f" git; then
-	        ln -sf git "$f"
-	    fi
-	done
-	# Assert, because the previous two attempts at this silently did nothing --
-	# the shell saw a literal '$f' and the loop matched no files, while the build
-	# reported success and only the EIF size gave it away.
-	links=$(find . -type l | wc -l)
-	echo "git-core symlinks: $links"
-	test "$links" -gt 100
 	cd /build_cpio/initramfs
 	find . -name '*.a' -delete
 	rm -rf usr/include
 	echo "initramfs: $(du -sh . | cut -f1)"
+	# The image must stay small: it is unpacked into the enclave's RAM, and the
+	# 6G verification tmpfs only bounds anything if there is memory left above it.
+	test "$(du -sm . | cut -f1)" -lt 900
 	find . -exec touch -hcd "@0" "{}" + -print0 \
 	| sort -z \
 	| cpio \
 	    --null \
 	    --create \
-	    --verbose \
 	    --reproducible \
 	    --format=newc \
 	| gzip --best \

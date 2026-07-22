@@ -128,31 +128,41 @@ EOF
 # identical 18.9 MB files. Doing it here means the tree cannot change between
 # being shrunk and being packed.
 #
+# The heredoc delimiter is quoted so Docker performs no substitution and the
+# shell receives the script verbatim; with an unquoted delimiter the escaping
+# needed to protect '$' from Docker left a literal '$' for the shell instead.
+#
 # Symlinks rather than hardlinks: they survive, and git dispatches on argv[0]
 # either way. Static archives and headers go too -- build-time artifacts nothing
 # at run time can load. /usr/share stays: git needs its templates to clone.
-RUN <<-EOF
-    set -eux
-    cd /build_cpio/initramfs/usr/libexec/git-core
-    for f in *; do
-        if [ -f "\$f" ] && [ "\$f" != git ] && cmp -s "\$f" git; then
-            ln -sf git "\$f"
-        fi
-    done
-    cd /build_cpio/initramfs
-    find . -name '*.a' -delete
-    rm -rf usr/include
-    echo "symlinks: \$(find . -type l | wc -l)  size: \$(du -sh . | cut -f1)"
-    find . -exec touch -hcd "@0" "{}" + -print0 \
-    | sort -z \
-    | cpio \
-        --null \
-        --create \
-        --verbose \
-        --reproducible \
-        --format=newc \
-    | gzip --best \
-    > /build_cpio/rootfs.cpio
+RUN <<-'EOF'
+	set -eux
+	cd /build_cpio/initramfs/usr/libexec/git-core
+	for f in *; do
+	    if [ -f "$f" ] && [ "$f" != git ] && cmp -s "$f" git; then
+	        ln -sf git "$f"
+	    fi
+	done
+	# Assert, because the previous two attempts at this silently did nothing --
+	# the shell saw a literal '$f' and the loop matched no files, while the build
+	# reported success and only the EIF size gave it away.
+	links=$(find . -type l | wc -l)
+	echo "git-core symlinks: $links"
+	test "$links" -gt 100
+	cd /build_cpio/initramfs
+	find . -name '*.a' -delete
+	rm -rf usr/include
+	echo "initramfs: $(du -sh . | cut -f1)"
+	find . -exec touch -hcd "@0" "{}" + -print0 \
+	| sort -z \
+	| cpio \
+	    --null \
+	    --create \
+	    --verbose \
+	    --reproducible \
+	    --format=newc \
+	| gzip --best \
+	> /build_cpio/rootfs.cpio
 EOF
 
 WORKDIR /build_eif

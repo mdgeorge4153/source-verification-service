@@ -27,13 +27,17 @@ const EBadSignature: vector<u8> =
 const VERIFY_SCOPE: u8 = 0;
 
 // Expected enclave PCRs, set at publish and updatable by the `Cap` holder via
-// `enclave::update_pcrs`. Provisional — these are the stage-1 build (no
-// verify-source binary bundled yet); the real values change once the EIF is
-// final. A deployer can also `update_pcrs` to all-zeros for debug-mode testing.
+// `enclave::update_pcrs`. From the EIF that carries the verifier (215 MB,
+// commit cbf3d34): `make ENCLAVE_APP=source-verification` then out/nitro.pcrs.
+// A deployer can `update_pcrs` to all-zeros for debug-mode testing.
+//
+// PCR2 has been identical across every build regardless of contents, so it is
+// PCR0/PCR1 that actually bind the image; pinning PCR2 costs nothing but proves
+// nothing either.
 const PCR0: vector<u8> =
-    x"2636e44c0588f296412e5474368ab06811f1dc55b7bbf33060eb9324e36714803b03c4576102d62358c2b3b736dfa0c1";
+    x"8b4074fbb4ed0ed70db680838c3885e40ac2d47996b0e6a6e69359bb00602c472db0d8a099df29941cbf36dd5bf27f4a";
 const PCR1: vector<u8> =
-    x"2636e44c0588f296412e5474368ab06811f1dc55b7bbf33060eb9324e36714803b03c4576102d62358c2b3b736dfa0c1";
+    x"8b4074fbb4ed0ed70db680838c3885e40ac2d47996b0e6a6e69359bb00602c472db0d8a099df29941cbf36dd5bf27f4a";
 const PCR2: vector<u8> =
     x"21b9efbc184807662e966d34f390821309eeac6802309798826296bf3e8bec7c10edb30948c90ba67310f7b964fc500a";
 

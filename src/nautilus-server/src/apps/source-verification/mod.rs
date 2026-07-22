@@ -162,6 +162,44 @@ fn git_rev_parse(dir: &Path) -> Result<String, EnclaveError> {
     )
 }
 
+/// The fullnode a build environment is verified against.
+///
+/// Only the environments the enclave can actually reach: it has no DNS, just the
+/// fixed `/etc/hosts` entries `run.sh` writes, so accepting others would turn a
+/// configuration mistake into an opaque connection failure.
+fn rpc_url(build_env: &str) -> Result<&'static str, EnclaveError> {
+    match build_env {
+        "mainnet" => Ok("https://fullnode.mainnet.sui.io:443"),
+        "testnet" => Ok("https://fullnode.testnet.sui.io:443"),
+        other => Err(err(format!(
+            "unsupported build_env {other:?}: the enclave has egress for mainnet and testnet only"
+        ))),
+    }
+}
+
+/// Write a client config for `build_env` under `dir`, returning its path.
+///
+/// `--build-env` selects which publication to compare against, but the RPC comes
+/// from the client's *active environment*. Without a config the CLI creates one
+/// defaulting to testnet, and a mainnet package is then reported as not found.
+/// No key is needed: verification only reads.
+fn write_client_config(dir: &Path, build_env: &str) -> Result<PathBuf, EnclaveError> {
+    let rpc = rpc_url(build_env)?;
+    std::fs::create_dir_all(dir).map_err(|e| err(format!("create {dir:?}: {e}")))?;
+    let keystore = dir.join("sui.keystore");
+    std::fs::write(&keystore, "[]").map_err(|e| err(format!("write keystore: {e}")))?;
+    let config = dir.join("client.yaml");
+    std::fs::write(
+        &config,
+        format!(
+            "keystore:\n  File: {}\nenvs:\n  - alias: {build_env}\n    rpc: \"{rpc}\"\n                 ws: ~\n    basic_auth: ~\nactive_env: {build_env}\nactive_address: ~\n",
+            path_str(&keystore)?
+        ),
+    )
+    .map_err(|e| err(format!("write client config: {e}")))?;
+    Ok(config)
+}
+
 /// What `verify-source` reports on success, from its `--json` output.
 ///
 /// Deliberately not derived from the package's own `Published.toml`: the address
@@ -196,10 +234,13 @@ fn run_verify_source(
     move_home: &Path,
 ) -> Result<VerifiedMetadata, EnclaveError> {
     let sui = std::env::var("SUI_BIN").unwrap_or_else(|_| "sui".to_string());
+    let config = write_client_config(move_home, build_env)?;
     let stdout = output(
         &sui,
         &[
             "client",
+            "--client.config",
+            path_str(&config)?,
             "verify-source",
             "--build-env",
             build_env,

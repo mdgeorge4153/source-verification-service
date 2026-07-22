@@ -60,15 +60,19 @@ public struct SourceVerifier has drop {}
 /// `toolchain_digest` is sha256 of that binary, so a consumer can check it
 /// against the official release for `toolchain_version` and decide whether to
 /// believe the rebuild.
+///
+/// Both digests are lowercase hex strings, not byte vectors: they exist to be
+/// compared by whoever reads the attestation, and a `vector<u8>` renders in an
+/// explorer as a list of decimal numbers that cannot be compared with anything.
 #[allow(unused_field)]
 public struct SourceVerification has copy, store, drop {
     pkg_id: ID,
-    source_hash: vector<u8>,
+    source_hash: String,
     git_url: String,
     subdir: String,
     git_sha: String,
     toolchain_version: String,
-    toolchain_digest: vector<u8>,
+    toolchain_digest: String,
 }
 
 /// Publish-time: mint the enclave `Cap<SourceVerifier>`, create the shared
@@ -104,12 +108,12 @@ public fun attest_source(
     registry: ID,
     enclave: &Enclave<SourceVerifier>,
     pkg_id: ID,
-    source_hash: vector<u8>,
+    source_hash: String,
     git_url: String,
     subdir: String,
     git_sha: String,
     toolchain_version: String,
-    toolchain_digest: vector<u8>,
+    toolchain_digest: String,
     timestamp_ms: u64,
     signature: vector<u8>,
     ctx: &mut TxContext,
@@ -130,8 +134,19 @@ public fun attest_source(
     attest(registry, internal::permit<SourceVerification>(), pkg_id, payload, ctx)
 }
 
-/// One-shot setup of the append-only `Display<Attestation<SourceVerification>>`.
-/// Call once shortly after publish; aborts on a second call.
+/// One-shot setup of the `Display<Attestation<SourceVerification>>`. Call once
+/// shortly after publish; aborts on a second call.
+///
+/// The Display is **append-only**: `attestations::add_display_field` refuses a
+/// field that is already set, and nothing exposes overwrite, unset or clear. So
+/// these strings are permanent once this runs, and getting them wrong cannot be
+/// corrected -- only added to. `image_url` is deliberately absent: it needs a
+/// stable public URL, and it can be appended later without disturbing these.
+///
+/// `link` interpolates `git_url`, which the requester supplies. That is sound
+/// here because a verification only succeeds if the enclave cloned that URL, and
+/// it can only reach the hosts its egress allows; but a consumer rendering it
+/// should still treat it as untrusted content, per the attestations conventions.
 entry fun register_source_display(
     registry: &Registry,
     display_registry: &mut DisplayRegistry,
@@ -140,10 +155,11 @@ entry fun register_source_display(
     registry.register_display(
         display_registry,
         internal::permit<SourceVerification>(),
-        vector[b"name".to_string(), b"description".to_string()],
+        vector[b"name".to_string(), b"description".to_string(), b"link".to_string()],
         vector[
-            b"Source verification".to_string(),
-            b"Package {data.pkg_id} was built from the source hashing to {data.source_hash}".to_string(),
+            b"Verified source".to_string(),
+            b"The source at {data.git_url} ({data.git_sha}), subdirectory {data.subdir}, compiles to the bytecode published at {data.pkg_id}. Rebuilt with sui {data.toolchain_version}. Source hash {data.source_hash}.".to_string(),
+            b"{data.git_url}".to_string(),
         ],
         ctx,
     );
@@ -155,12 +171,12 @@ entry fun register_source_display(
 fun signing_bytes_match_rust() {
     let payload = SourceVerification {
         pkg_id: object::id_from_address(@0x2a),
-        source_hash: b"abc",
+        source_hash: b"abc".to_string(),
         git_url: b"https://example.com/repo.git".to_string(),
         subdir: b"pkg".to_string(),
         git_sha: b"deadbeef".to_string(),
         toolchain_version: b"1.71.1".to_string(),
-        toolchain_digest: b"xyz",
+        toolchain_digest: b"xyz".to_string(),
     };
     let msg = enclave::create_intent_message(VERIFY_SCOPE, 1_700_000_000_000, payload);
     let expected =
@@ -188,12 +204,12 @@ fun attest_source_accepts_valid_signature() {
         object::id(&registry),
         &enclave,
         object::id_from_address(@0x2a),
-        b"abc",
+        b"abc".to_string(),
         b"https://example.com/repo.git".to_string(),
         b"pkg".to_string(),
         b"deadbeef".to_string(),
         b"1.71.1".to_string(),
-        b"xyz",
+        b"xyz".to_string(),
         1_700_000_000_000,
         x"d13ea677c4a3e33c9ec5010f0724e55fc19edb8518818653ed88b8b85bf62645d5f2b34d3ff972ae10fb65df2413e9aa39c66e45df6c815b9a43e90716c32a0b",
         scenario.ctx(),
@@ -222,12 +238,12 @@ fun attest_source_rejects_bad_signature() {
         object::id(&registry),
         &enclave,
         object::id_from_address(@0x2a),
-        b"abc",
+        b"abc".to_string(),
         b"https://example.com/repo.git".to_string(),
         b"pkg".to_string(),
         b"deadbeef".to_string(),
         b"1.71.1".to_string(),
-        b"xyz",
+        b"xyz".to_string(),
         1_700_000_000_000,
         x"00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
         scenario.ctx(),

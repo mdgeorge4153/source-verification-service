@@ -91,8 +91,9 @@ done
 # --- record it onchain ------------------------------------------------------
 
 # pkg_id is a 32-byte array in the response but an ID in Move, so it becomes an
-# address literal; the other byte strings become vector[..u8] arguments, which is
-# the only form `sui client ptb` accepts for vector<u8>.
+# address literal. The digests are already hex strings and pass through as
+# strings; only the signature is still a vector<u8>, which `sui client ptb`
+# accepts only as a vector[..u8] literal.
 eval "$(echo "$RESPONSE" | python3 -c '
 import json, sys
 r = json.load(sys.stdin)
@@ -105,8 +106,8 @@ def hexbytes(s):
     return [int(s[i:i+2], 16) for i in range(0, len(s), 2)]
 
 print(f"""PKG_ID=0x{"".join(f"{b:02x}" for b in d["pkg_id"])}""")
-print(f"""SOURCE_HASH={vec(d["source_hash"])!r}""")
-print(f"""TOOLCHAIN_DIGEST={vec(d["toolchain_digest"])!r}""")
+print(f"""SOURCE_HASH={d["source_hash"]!r}""")
+print(f"""TOOLCHAIN_DIGEST={d["toolchain_digest"]!r}""")
 print(f"""SIG_VEC={vec(hexbytes(r["signature"]))!r}""")
 print(f"""TIMESTAMP_MS={r["response"]["timestamp_ms"]}""")
 print(f"""TOOLCHAIN_VERSION={d["toolchain_version"]!r}""")
@@ -118,19 +119,17 @@ print(f"""RESP_GIT_SHA={d["git_sha"]!r}""")
 echo "recording attestation for $PKG_ID"
 
 sui client ptb \
-    --assign source_hash "$SOURCE_HASH" \
-    --assign toolchain_digest "$TOOLCHAIN_DIGEST" \
     --assign signature "$SIG_VEC" \
     --move-call "${APP_PACKAGE_ID}::source_verification::attest_source" \
         @"${ATTESTATION_REGISTRY_ID}" \
         @"${ENCLAVE_OBJECT_ID}" \
         @"${PKG_ID}" \
-        source_hash \
+        "'${SOURCE_HASH}'" \
         "'${RESP_GIT_URL}'" \
         "'${RESP_SUBDIR}'" \
         "'${RESP_GIT_SHA}'" \
         "'${TOOLCHAIN_VERSION}'" \
-        toolchain_digest \
+        "'${TOOLCHAIN_DIGEST}'" \
         "${TIMESTAMP_MS}" \
         signature \
     --gas-budget "$GAS_BUDGET"

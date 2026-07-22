@@ -56,15 +56,21 @@ pub struct VerifyRequest {
 /// what performed it, and a substituted release would be indistinguishable.
 /// `toolchain_digest` is sha256 of the compiler binary as executed, so a consumer
 /// can check it against the corresponding official release.
+///
+/// The two digests are lowercase hex strings rather than byte vectors. They exist
+/// to be compared by whoever reads the attestation -- against a recomputed source
+/// hash, or against `sha256sum` of an official release -- and a `vector<u8>`
+/// renders in explorers as a list of decimal numbers, which nobody can compare
+/// against anything.
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct SourceVerification {
     pub pkg_id: [u8; 32],
-    pub source_hash: Vec<u8>,
+    pub source_hash: String,
     pub git_url: String,
     pub subdir: String,
     pub git_sha: String,
     pub toolchain_version: String,
-    pub toolchain_digest: Vec<u8>,
+    pub toolchain_digest: String,
 }
 
 /// Admits one verification at a time.
@@ -112,7 +118,7 @@ pub async fn process_data(
         subdir: req.subdir,
         git_sha,
         toolchain_version: verified.toolchain_version,
-        toolchain_digest: Sha256::digest(toolchain).digest.to_vec(),
+        toolchain_digest: Hex::encode(Sha256::digest(toolchain).digest),
     };
     Ok(Json(to_signed_response(
         &state.eph_kp,
@@ -299,11 +305,12 @@ fn run_verify_source(
         .map_err(|e| err(format!("parse verify-source --json output: {e}: {stdout}")))
 }
 
-/// blake2b256 over a lexicographically-sorted manifest of the package directory:
+/// Lowercase hex of a blake2b256 over a lexicographically-sorted manifest of the
+/// package directory:
 /// for each file, `<relative path>` + NUL + `blake2b256(contents)`. Reproducible
 /// from the same source tree; filenames and file boundaries are part of the hash
 /// so content cannot be shuffled between files undetected.
-fn hash_dir(dir: &Path) -> Result<Vec<u8>, EnclaveError> {
+fn hash_dir(dir: &Path) -> Result<String, EnclaveError> {
     let mut files = Vec::new();
     collect_files(dir, dir, &mut files)?;
     files.sort();
@@ -314,7 +321,7 @@ fn hash_dir(dir: &Path) -> Result<Vec<u8>, EnclaveError> {
         manifest.update([0u8]);
         manifest.update(Blake2b256::digest(content).digest);
     }
-    Ok(manifest.finalize().digest.to_vec())
+    Ok(Hex::encode(manifest.finalize().digest))
 }
 
 /// Collect files under `dir` as paths relative to `root`.
@@ -510,12 +517,12 @@ mod tests {
         pkg_id[31] = 0x2a;
         let payload = SourceVerification {
             pkg_id,
-            source_hash: b"abc".to_vec(),
+            source_hash: "abc".to_string(),
             git_url: "https://example.com/repo.git".to_string(),
             subdir: "pkg".to_string(),
             git_sha: "deadbeef".to_string(),
             toolchain_version: "1.71.1".to_string(),
-            toolchain_digest: b"xyz".to_vec(),
+            toolchain_digest: "xyz".to_string(),
         };
         let msg = IntentMessage::new(
             payload,

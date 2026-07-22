@@ -165,18 +165,18 @@ curl -H 'Content-Type: application/json' -d '{"payload": { "location": "San Fran
 
 ### Running prebuilt binaries inside the enclave
 
-The enclave image is assembled from [StageX](https://stagex.tools) packages and is musl-based, and `nautilus-server` itself is statically linked against musl. If your `process_data` shells out to a binary you did not build — a vendor CLI, a language toolchain, an agent runtime — that binary is almost certainly linked against **glibc** (every official Linux release build of `sui` is, for example), and it will not start: the image has no glibc and no loader for it.
+If your `process_data` logic shells out to a prebuilt binary (such as a vendor CLI or an official `sui` release), that binary is most likely linked against [glibc](https://www.gnu.org/software/libc/), the standard C library on most Linux distributions (e.g. the `sui` binary). One can add the glibc runtime as a StageX dependency, like the other packages in the `Containerfile`, keeping the build reproducible and covered by the PCRs.
 
-StageX ships glibc, so this is fixed inside the existing `Containerfile`, with no change of build system. The added runtime is part of the image and so is covered by the PCRs, exactly like everything else in it.
+To add the glibc runtime:
 
-Add two image aliases alongside the others at the top of the `Containerfile`:
+1. Add two image aliases alongside the others at the top of the `Containerfile`:
 
 ```dockerfile
 FROM stagex/user-glibc@sha256:56bae3d45f62f61c94c679a5ce0a11c8cc5735448916ed65232edffaba25cde2 AS user-glibc
 FROM stagex/core-cross-x86_64-gnu-gcc@sha256:79f4b11f01371aeca88c36c39ff9a5fcdc2e6152dedd2513b2e9026c11fafdc0 AS gnu-gcc
 ```
 
-and copy the runtime into the initramfs, next to the other `COPY --from=... initramfs` lines:
+2. Copy the runtime into the initramfs, next to the other `COPY --from=... initramfs` lines:
 
 ```dockerfile
 COPY --from=user-glibc . initramfs
@@ -184,12 +184,11 @@ COPY --from=gnu-gcc /opt/cross/x86_64-linux-gnu/lib64/libstdc++.so.6* initramfs/
 COPY --from=gnu-gcc /opt/cross/x86_64-linux-gnu/lib64/libgcc_s.so.1 initramfs/usr/lib/
 ```
 
-Two things here are easy to get wrong:
+> [!NOTE]
+> - Take `libstdc++` and `libgcc_s` from `core-cross-x86_64-gnu-gcc` under `lib64/`, not from `core-gcc`, whose copies are musl-targeted and will not load into a glibc process.
+> - Do not add a `/lib64` symlink for the loader. The path `/lib64/ld-linux-x86-64.so.2` already resolves: `core-busybox` provides a `lib64 -> usr/lib` symlink and `user-glibc` installs the loader at `/usr/lib/ld-linux-x86-64.so.2`. Creating `/lib64` writes through the existing symlink and replaces the loader with a link to itself, after which every exec fails with `too many levels of symbolic links`.
 
-- **Do not add a `/lib64` symlink of your own.** A glibc binary built on Ubuntu hard-codes its interpreter as `/lib64/ld-linux-x86-64.so.2`, so the instinct is to create that path. It already resolves: `core-busybox` brings a merged-`/usr` `lib64 -> usr/lib` symlink, and `user-glibc` installs the loader at `/usr/lib/ld-linux-x86-64.so.2`. Creating `/lib64` writes *through* the existing symlink and replaces the loader with a link to itself; every exec then fails with `too many levels of symbolic links`.
-- **Take `libstdc++` and `libgcc_s` from `core-cross-x86_64-gnu-gcc`, under `lib64/`.** The copies in `core-gcc` are musl-targeted and will not load into a glibc process.
-
-Check what your binary actually asks for before assuming the above is enough. Anything else it needs is added the same way — a `FROM stagex/...` alias and a `COPY --from=... . initramfs` — and the requirements compose: adding `git`, for instance, also means adding `core-zlib`, and using `git` over HTTPS also means `core-curl`.
+3. Check what your binary actually requires. Any additional library is added the same way: a `FROM stagex/...` alias and a `COPY --from=... . initramfs` line. Note that requirements compose. For example, adding `git` also requires `core-zlib`, and using `git` over HTTPS also requires `core-curl`.
 
 ```shell
 # Shared libraries the binary needs, and the oldest glibc that satisfies its symbols
@@ -197,10 +196,7 @@ objdump -p ./mybinary | grep NEEDED
 objdump -T ./mybinary | grep -o 'GLIBC_[0-9.]*' | sort -Vu | tail -1
 ```
 
-Two consequences of this being a Nitro enclave are worth planning for:
-
-- **The filesystem is RAM.** The initramfs is the root filesystem, and everything the binary writes at runtime is memory too. A large toolchain plus its scratch space has to fit in the memory allocated to the enclave, which is why `make run` takes a `MEMORY` override; a several-hundred-megabyte image will not boot in the 512M default.
-- **The enclave has no network of its own.** Anything the binary downloads goes through the traffic forwarder, so its hosts belong in `allowed_endpoints.yaml` like any other egress. A binary that fetches from a host you have not listed will fail in ways that look like the binary being broken.
+To raise the default 512M enclave memory, use `make run MEMORY=...` if needed. If the binary fetches from external hosts, add them to `allowed_endpoints.yaml`.
 
 ### Troubleshooting
 

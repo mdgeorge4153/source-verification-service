@@ -35,9 +35,9 @@ const VERIFY_SCOPE: u8 = 0;
 // PCR0/PCR1 that actually bind the image; pinning PCR2 costs nothing but proves
 // nothing either.
 const PCR0: vector<u8> =
-    x"8b4074fbb4ed0ed70db680838c3885e40ac2d47996b0e6a6e69359bb00602c472db0d8a099df29941cbf36dd5bf27f4a";
+    x"928da0dc77eb59edfc53d1224245ffe922ce4544b50cb8ff067a11d5676885d01983575b9943ebb9b874523dfbe30c74";
 const PCR1: vector<u8> =
-    x"8b4074fbb4ed0ed70db680838c3885e40ac2d47996b0e6a6e69359bb00602c472db0d8a099df29941cbf36dd5bf27f4a";
+    x"928da0dc77eb59edfc53d1224245ffe922ce4544b50cb8ff067a11d5676885d01983575b9943ebb9b874523dfbe30c74";
 const PCR2: vector<u8> =
     x"21b9efbc184807662e966d34f390821309eeac6802309798826296bf3e8bec7c10edb30948c90ba67310f7b964fc500a";
 

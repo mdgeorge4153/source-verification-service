@@ -104,26 +104,6 @@ COPY --from=core-libzstd . initramfs
 COPY --from=core-curl . initramfs
 COPY --from=core-git . initramfs
 COPY --from=core-ca-certificates . initramfs
-# git ships the ~140 commands in libexec/git-core as hardlinks to one binary, and
-# `COPY` does not preserve hardlinks -- each arrives as a full copy, which for git
-# is 141 identical files of 18.9 MB: 2.6 GB of duplicate bytes in a filesystem
-# that is RAM. Symlinks survive the copy and dispatch identically, since git
-# selects its command from argv[0] either way. Static archives and headers go too;
-# they are build-time artifacts that nothing at run time can load. /usr/share
-# stays -- git needs its templates to clone.
-RUN <<-EOF
-    set -eux
-    cd initramfs/usr/libexec/git-core
-    for f in *; do
-        if [ -f "\$f" ] && [ "\$f" != git ] && cmp -s "\$f" git; then
-            ln -sf git "\$f"
-        fi
-    done
-    cd /build_cpio/initramfs
-    find . -name '*.a' -delete
-    rm -rf usr/include
-    du -sh /build_cpio/initramfs
-EOF
 # The Move compiler the verifier runs. Baked in rather than downloaded so that it
 # is covered by the PCRs: an enclave that fetched its own verifier at run time
 # would attest to a rebuild performed by unmeasured code. Build it with
@@ -141,9 +121,28 @@ SUI_BIN=/sui
 PATH=/bin:/sbin:/usr/bin:/usr/sbin:/
 EOF
 
+# Shrink and pack in one step. These must not be separate layers: git's ~140
+# commands in libexec/git-core are hardlinks to one binary, `COPY` does not
+# preserve hardlinks, and replacing them in an earlier layer did not survive the
+# `COPY` of the verifier that follows it -- the archive still came out with 141
+# identical 18.9 MB files. Doing it here means the tree cannot change between
+# being shrunk and being packed.
+#
+# Symlinks rather than hardlinks: they survive, and git dispatches on argv[0]
+# either way. Static archives and headers go too -- build-time artifacts nothing
+# at run time can load. /usr/share stays: git needs its templates to clone.
 RUN <<-EOF
     set -eux
-    cd initramfs
+    cd /build_cpio/initramfs/usr/libexec/git-core
+    for f in *; do
+        if [ -f "\$f" ] && [ "\$f" != git ] && cmp -s "\$f" git; then
+            ln -sf git "\$f"
+        fi
+    done
+    cd /build_cpio/initramfs
+    find . -name '*.a' -delete
+    rm -rf usr/include
+    echo "symlinks: \$(find . -type l | wc -l)  size: \$(du -sh . | cut -f1)"
     find . -exec touch -hcd "@0" "{}" + -print0 \
     | sort -z \
     | cpio \

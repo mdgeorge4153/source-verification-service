@@ -25,6 +25,13 @@ echo "127.0.0.1   localhost" > /etc/hosts
 echo "127.0.0.64   github.com" >> /etc/hosts
 echo "127.0.0.65   raw.githubusercontent.com" >> /etc/hosts
 echo "127.0.0.66   fullnode.testnet.sui.io" >> /etc/hosts
+# Release archives redirect off github.com to this host; without it the toolchain
+# download fails after the redirect, which reads as a broken download rather than
+# a missing egress rule. Verified: the asset URL 302s here in a single hop.
+echo "127.0.0.67   release-assets.githubusercontent.com" >> /etc/hosts
+# Needed to verify packages published on mainnet: verify-source compares against
+# the RPC of the client's active environment.
+echo "127.0.0.68   fullnode.mainnet.sui.io" >> /etc/hosts
 
 
 
@@ -49,6 +56,8 @@ echo "$JSON_RESPONSE" | jq -r 'to_entries[] | "\(.key)=\(.value)"' > /tmp/kvpair
 python3 /traffic_forwarder.py 127.0.0.64 443 3 8101 &
 python3 /traffic_forwarder.py 127.0.0.65 443 3 8102 &
 python3 /traffic_forwarder.py 127.0.0.66 443 3 8103 &
+python3 /traffic_forwarder.py 127.0.0.67 443 3 8104 &
+python3 /traffic_forwarder.py 127.0.0.68 443 3 8105 &
 
 
 

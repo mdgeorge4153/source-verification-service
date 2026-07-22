@@ -189,14 +189,23 @@ fn write_client_config(dir: &Path, build_env: &str) -> Result<PathBuf, EnclaveEr
     let keystore = dir.join("sui.keystore");
     std::fs::write(&keystore, "[]").map_err(|e| err(format!("write keystore: {e}")))?;
     let config = dir.join("client.yaml");
-    std::fs::write(
-        &config,
-        format!(
-            "keystore:\n  File: {}\nenvs:\n  - alias: {build_env}\n    rpc: \"{rpc}\"\n                 ws: ~\n    basic_auth: ~\nactive_env: {build_env}\nactive_address: ~\n",
-            path_str(&keystore)?
-        ),
-    )
-    .map_err(|e| err(format!("write client config: {e}")))?;
+    // A raw literal, not an escaped one: the indentation here is significant, and
+    // an escaped string with line continuations had its alignment whitespace
+    // folded into the value by rustfmt, producing YAML that would not parse.
+    let yaml = format!(
+        r#"keystore:
+  File: {keystore}
+envs:
+  - alias: {build_env}
+    rpc: "{rpc}"
+    ws: ~
+    basic_auth: ~
+active_env: {build_env}
+active_address: ~
+"#,
+        keystore = path_str(&keystore)?,
+    );
+    std::fs::write(&config, yaml).map_err(|e| err(format!("write client config: {e}")))?;
     Ok(config)
 }
 
@@ -362,6 +371,35 @@ mod tests {
     use super::*;
     use crate::common::IntentMessage;
     use fastcrypto::encoding::{Encoding, Hex};
+
+    /// The generated client config is valid YAML with the indentation the sui
+    /// CLI expects. Pinned because an earlier version built this with escaped
+    /// line continuations, and rustfmt folded the alignment whitespace into the
+    /// string, emitting a file the CLI refused to parse.
+    #[test]
+    fn client_config_yaml_is_well_formed() {
+        let dir = std::env::temp_dir().join(format!("cfgtest-{}", std::process::id()));
+        let config = write_client_config(&dir, "mainnet").expect("writes");
+        let text = std::fs::read_to_string(&config).expect("reads");
+
+        assert!(text.contains("\n  - alias: mainnet\n"));
+        assert!(text.contains("\n    rpc: \"https://fullnode.mainnet.sui.io:443\"\n"));
+        assert!(text.contains("\n    ws: ~\n"));
+        assert!(text.contains("\n    basic_auth: ~\n"));
+        assert!(text.contains("\nactive_env: mainnet\n"));
+        // Every key under the env entry sits at exactly four spaces.
+        for line in text
+            .lines()
+            .filter(|l| l.starts_with(' ') && l.contains(": "))
+        {
+            let indent = line.len() - line.trim_start().len();
+            assert!(
+                indent == 2 || indent == 4,
+                "bad indent {indent} in {line:?}"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     /// Pins the `verify-source --json` contract this app parses. Fields it does
     /// not need (here `originalId`) must be tolerated, not rejected.

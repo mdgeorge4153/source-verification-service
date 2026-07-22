@@ -143,10 +143,16 @@ public fun attest_source(
 /// corrected -- only added to. `image_url` is deliberately absent: it needs a
 /// stable public URL, and it can be appended later without disturbing these.
 ///
-/// `link` interpolates `git_url`, which the requester supplies. That is sound
-/// here because a verification only succeeds if the enclave cloned that URL, and
-/// it can only reach the hosts its egress allows; but a consumer rendering it
-/// should still treat it as untrusted content, per the attestations conventions.
+/// `link` is a fixed URL to this service, not the verified repository. By the
+/// attestations conventions it names the artifact backing the attestation -- an
+/// audit attestation links its report -- and this service produces no report, so
+/// what a reader needs is what the claim means and how to reproduce it. The
+/// verified repository is already in the description, as data.
+///
+/// It is also the only safe choice: those conventions tell consumers to constrain
+/// `link` to the attester's known domains, and interpolating the requester-supplied
+/// `git_url` would make it vary per attestation and point at hosts this service
+/// does not control.
 entry fun register_source_display(
     registry: &Registry,
     display_registry: &mut DisplayRegistry,
@@ -159,7 +165,7 @@ entry fun register_source_display(
         vector[
             b"Verified source".to_string(),
             b"The source at {data.git_url} ({data.git_sha}), subdirectory {data.subdir}, compiles to the bytecode published at {data.pkg_id}. Rebuilt with sui {data.toolchain_version}. Source hash {data.source_hash}.".to_string(),
-            b"{data.git_url}".to_string(),
+            b"https://github.com/MystenLabs/source-verification-service".to_string(),
         ],
         ctx,
     );

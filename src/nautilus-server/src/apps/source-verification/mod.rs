@@ -91,6 +91,7 @@ pub async fn process_data(
     let workdir = Workdir {
         path: std::env::temp_dir().join(format!("srcverif-{}", uuid::Uuid::new_v4())),
     };
+    check_request(&req)?;
     let clone = workdir.path.join("repo");
     git_clone_checkout(&req.git_url, &req.git_rev, &clone)?;
     let git_sha = git_rev_parse(&clone)?;
@@ -121,6 +122,40 @@ pub async fn process_data(
     )))
 }
 
+/// Reject request fields that git would read as options, or that would escape
+/// the request's working directory.
+///
+/// These are attacker-controlled and reach `git` as positional arguments, where a
+/// leading `-` is an option rather than an operand: a `git_url` of
+/// `--upload-pack=<cmd>` runs `<cmd>`. The enclave holds the signing key, so code
+/// execution here forges attestations rather than merely misbehaving. `subdir` is
+/// joined onto the checkout, and `Path::join` with an absolute path discards the
+/// base entirely, so an unchecked value selects any directory in the image.
+fn check_request(req: &VerifyRequest) -> Result<(), EnclaveError> {
+    if !req.git_url.starts_with("https://") {
+        return Err(err("git_url must be an https:// URL"));
+    }
+    if req.git_rev.is_empty()
+        || !req
+            .git_rev
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"./_-".contains(&b))
+        || req.git_rev.starts_with('-')
+        || req.git_rev.contains("..")
+    {
+        return Err(err("git_rev must be a plain branch, tag or commit"));
+    }
+    let subdir = Path::new(&req.subdir);
+    if subdir.is_absolute()
+        || subdir
+            .components()
+            .any(|c| !matches!(c, std::path::Component::Normal(_)))
+    {
+        return Err(err("subdir must be a relative path inside the repository"));
+    }
+    Ok(())
+}
+
 /// A scratch directory removed when dropped.
 ///
 /// On drop rather than at the end of a request because a verification can fail
@@ -149,8 +184,10 @@ fn parse_pkg_id(s: &str) -> Result<[u8; 32], EnclaveError> {
 /// Clone `url` into `dest` and check out `rev`.
 fn git_clone_checkout(url: &str, rev: &str, dest: &Path) -> Result<(), EnclaveError> {
     let dest = path_str(dest)?;
-    run("git", &["clone", "--quiet", url, dest])?;
-    run("git", &["-C", dest, "checkout", "--quiet", rev])
+    // `--` as well as the checks in `check_request`: either alone stops a
+    // leading-dash operand being read as an option.
+    run("git", &["clone", "--quiet", "--", url, dest])?;
+    run("git", &["-C", dest, "checkout", "--quiet", rev, "--"])
 }
 
 /// Resolve the checked-out commit to its full SHA.
@@ -371,6 +408,47 @@ mod tests {
     use super::*;
     use crate::common::IntentMessage;
     use fastcrypto::encoding::{Encoding, Hex};
+
+    fn req(git_url: &str, git_rev: &str, subdir: &str) -> VerifyRequest {
+        VerifyRequest {
+            git_url: git_url.to_string(),
+            git_rev: git_rev.to_string(),
+            subdir: subdir.to_string(),
+            build_env: "mainnet".to_string(),
+        }
+    }
+
+    /// A well-formed request is accepted.
+    #[test]
+    fn check_request_accepts_ordinary_input() {
+        assert!(check_request(&req(
+            "https://github.com/MystenLabs/deepbookv3.git",
+            "verify/v8",
+            "packages/deepbook"
+        ))
+        .is_ok());
+        assert!(check_request(&req("https://example.com/x.git", "e87243ed", "")).is_ok());
+    }
+
+    /// Fields git would read as options are rejected. `--upload-pack=<cmd>` as a
+    /// URL is remote code execution in an enclave that holds a signing key.
+    #[test]
+    fn check_request_rejects_option_lookalikes() {
+        assert!(check_request(&req("--upload-pack=touch /tmp/pwn", "main", "p")).is_err());
+        assert!(check_request(&req("-q", "main", "p")).is_err());
+        assert!(check_request(&req("git@github.com:a/b.git", "main", "p")).is_err());
+        assert!(check_request(&req("https://e.com/x.git", "--upload-pack=x", "p")).is_err());
+        assert!(check_request(&req("https://e.com/x.git", "-q", "p")).is_err());
+    }
+
+    /// Subdirs that leave the checkout are rejected. `Path::join` with an
+    /// absolute path discards the base, selecting any directory in the image.
+    #[test]
+    fn check_request_rejects_escaping_subdir() {
+        assert!(check_request(&req("https://e.com/x.git", "main", "/etc")).is_err());
+        assert!(check_request(&req("https://e.com/x.git", "main", "../../etc")).is_err());
+        assert!(check_request(&req("https://e.com/x.git", "main", "a/../../b")).is_err());
+    }
 
     /// The generated client config is valid YAML with the indentation the sui
     /// CLI expects. Pinned because an earlier version built this with escaped

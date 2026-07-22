@@ -104,6 +104,26 @@ COPY --from=core-libzstd . initramfs
 COPY --from=core-curl . initramfs
 COPY --from=core-git . initramfs
 COPY --from=core-ca-certificates . initramfs
+# git ships the ~140 commands in libexec/git-core as hardlinks to one binary, and
+# `COPY` does not preserve hardlinks -- each arrives as a full copy, which for git
+# is 141 identical files of 18.9 MB: 2.6 GB of duplicate bytes in a filesystem
+# that is RAM. Symlinks survive the copy and dispatch identically, since git
+# selects its command from argv[0] either way. Static archives and headers go too;
+# they are build-time artifacts that nothing at run time can load. /usr/share
+# stays -- git needs its templates to clone.
+RUN <<-EOF
+    set -eux
+    cd initramfs/usr/libexec/git-core
+    for f in *; do
+        if [ -f "\$f" ] && [ "\$f" != git ] && cmp -s "\$f" git; then
+            ln -sf git "\$f"
+        fi
+    done
+    cd /build_cpio/initramfs
+    find . -name '*.a' -delete
+    rm -rf usr/include
+    du -sh /build_cpio/initramfs
+EOF
 # The Move compiler the verifier runs. Baked in rather than downloaded so that it
 # is covered by the PCRs: an enclave that fetched its own verifier at run time
 # would attest to a rebuild performed by unmeasured code. Build it with

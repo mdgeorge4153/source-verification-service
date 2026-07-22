@@ -19,6 +19,8 @@ FROM stagex/core-pkgconf@sha256:52624a89bb8cc684bc0391fcb7770ded2bbcb281e84bdb68
 FROM stagex/core-busybox@sha256:637b1e0d9866807fac94c22d6dc4b2e1f45c8a5ca1113c88172e0324a30c7283 AS core-busybox
 FROM stagex/core-python@sha256:95504b36f4340782f5aa492d68f9a713406391898bf41cd62c9c9b54d6bee3f1 AS core-python
 FROM stagex/core-libzstd@sha256:5382c221194b6d0690eb65ccca01c720a6bd39f92e610dbc0e99ba43f38f3094 AS core-libzstd
+# TODO: pin by @sha256 once a build has resolved the digest.
+FROM stagex/core-curl AS core-curl
 FROM stagex/user-eif_build@sha256:935032172a23772ea1a35c6334aa98aa7b0c46f9e34a040347c7b2a73496ef8a AS user-eif_build
 FROM stagex/user-gen_initramfs@sha256:a87e9a3fa8468d2e08b5abb0a6da4c7a11df22273e2c526cb22e6b131151def8 AS user-gen_initramfs
 FROM stagex/user-linux-nitro@sha256:aa1006d91a7265b33b86160031daad2fdf54ec2663ed5ccbd312567cc9beff2c AS user-linux-nitro
@@ -89,12 +91,33 @@ COPY --from=user-nit /bin/init initramfs
 COPY --from=user-glibc . initramfs
 COPY --from=gnu-gcc /opt/cross/x86_64-linux-gnu/lib64/libstdc++.so.6* initramfs/usr/lib/
 COPY --from=gnu-gcc /opt/cross/x86_64-linux-gnu/lib64/libgcc_s.so.1 initramfs/usr/lib/
+# --- what the verifier shells out to ---
+# The base image above has none of these: the stock initramfs is busybox, python,
+# jq, socat and init. `git` fetches the source under verification and, for older
+# packages, its dependencies; it needs zlib, and git-remote-https needs curl,
+# which needs openssl. zstd is needed to clone repositories that use it. The full
+# ca-certificates package rather than just /etc/ssl/certs, so that curl and git
+# find the bundle at its conventional path as well as the one SSL_CERT_FILE names.
+COPY --from=core-zlib . initramfs
+COPY --from=core-openssl . initramfs
+COPY --from=core-libzstd . initramfs
+COPY --from=core-curl . initramfs
+COPY --from=core-git . initramfs
+COPY --from=core-ca-certificates . initramfs
+# The Move compiler the verifier runs. Baked in rather than downloaded so that it
+# is covered by the PCRs: an enclave that fetched its own verifier at run time
+# would attest to a rebuild performed by unmeasured code. Build it with
+# `make verifier` (see the Makefile) before building the EIF.
+COPY verifier/sui initramfs/sui
 RUN cp /src/nautilus-server/target/${TARGET}/release/nautilus-server initramfs
 RUN cp /src/nautilus-server/traffic_forwarder.py initramfs/
 RUN cp /src/nautilus-server/run.sh initramfs/
 
 COPY <<-EOF initramfs/etc/environment
 SSL_CERT_FILE=/ca-certificates.crt
+GIT_SSL_CAINFO=/ca-certificates.crt
+CURL_CA_BUNDLE=/ca-certificates.crt
+SUI_BIN=/sui
 PATH=/bin:/sbin:/usr/bin:/usr/sbin:/
 EOF
 

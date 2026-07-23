@@ -12,7 +12,7 @@ module source_verification::source_verification;
 use std::internal;
 use std::string::String;
 use sui::display_registry::DisplayRegistry;
-use enclave::enclave::{Self, Enclave};
+use enclave::enclave::{Self, Enclave, EnclaveConfig};
 use attestations::attestations::{Registry, attest};
 
 #[test_only]
@@ -21,6 +21,10 @@ use sui::test_scenario;
 #[error(code = 0)]
 const EBadSignature: vector<u8> =
     b"enclave signature does not verify against the registered enclave";
+
+#[error(code = 1)]
+const EStaleEnclave: vector<u8> =
+    b"enclave registered against PCRs that have since been rotated";
 
 /// Intent scope the enclave stamps when signing a `SourceVerification`. Must
 /// match `IntentScope::SourceVerification` in the enclave server.
@@ -35,9 +39,9 @@ const VERIFY_SCOPE: u8 = 0;
 // PCR0/PCR1 that actually bind the image; pinning PCR2 costs nothing but proves
 // nothing either.
 const PCR0: vector<u8> =
-    x"928da0dc77eb59edfc53d1224245ffe922ce4544b50cb8ff067a11d5676885d01983575b9943ebb9b874523dfbe30c74";
+    x"4d4412ffa7d719cf2b23f4989d483f5b348ce8098985bac8dbd1608b6c59e198a264e325157b405cc30b3bc937027e7a";
 const PCR1: vector<u8> =
-    x"928da0dc77eb59edfc53d1224245ffe922ce4544b50cb8ff067a11d5676885d01983575b9943ebb9b874523dfbe30c74";
+    x"4d4412ffa7d719cf2b23f4989d483f5b348ce8098985bac8dbd1608b6c59e198a264e325157b405cc30b3bc937027e7a";
 const PCR2: vector<u8> =
     x"21b9efbc184807662e966d34f390821309eeac6802309798826296bf3e8bec7c10edb30948c90ba67310f7b964fc500a";
 
@@ -94,9 +98,17 @@ fun init(ctx: &mut TxContext) {
 
 /// Verify an enclave-signed `SourceVerification` and record it as an
 /// `Attestation<SourceVerification>` about `pkg_id`. Accepts any
-/// `Enclave<SourceVerifier>` registered against the config (permissionless
+/// `Enclave<SourceVerifier>` registered against `config` (permissionless
 /// multi-provider). `registry` is the attestations `Registry` id. Returns the
 /// new attestation's ID.
+///
+/// Aborts `EStaleEnclave` unless the enclave registered against the *current*
+/// config version. Without that check, rotating the PCRs would not revoke
+/// anything: an `Enclave` object registered against the old ones keeps a working
+/// key, and its signatures stay acceptable for as long as the object exists.
+/// Revocation would then depend on someone calling `destroy_old_enclave`, which
+/// makes it a cleanup task rather than a control. With the check, `update_pcrs`
+/// takes effect immediately.
 ///
 /// The payload arrives as fields rather than as a `SourceVerification` because a
 /// programmable transaction can supply only primitives, vectors and a handful of
@@ -107,6 +119,7 @@ fun init(ctx: &mut TxContext) {
 public fun attest_source(
     registry: ID,
     enclave: &Enclave<SourceVerifier>,
+    config: &EnclaveConfig<SourceVerifier>,
     pkg_id: ID,
     source_hash: String,
     git_url: String,
@@ -127,6 +140,7 @@ public fun attest_source(
         toolchain_version,
         toolchain_digest,
     };
+    assert!(enclave.config_version() == config.version(), EStaleEnclave);
     assert!(
         enclave.verify_signature(VERIFY_SCOPE, timestamp_ms, payload, &signature),
         EBadSignature,
@@ -190,6 +204,60 @@ fun signing_bytes_match_rust() {
     assert!(sui::bcs::to_bytes(&msg) == expected);
 }
 
+#[test_only]
+/// A registry, a config created through the real path, and an enclave holding the
+/// fixed test key. Returns them for the caller to consume.
+fun setup(scenario: &mut test_scenario::Scenario, alice: address): (Registry, EnclaveConfig<SourceVerifier>, Enclave<SourceVerifier>) {
+    attestations::attestations::init_for_testing(scenario.ctx());
+    let cap = enclave::new_cap(SourceVerifier {}, scenario.ctx());
+    enclave::create_enclave_config(&cap, b"test".to_string(), PCR0, PCR1, PCR2, scenario.ctx());
+    let enclave = enclave::new_enclave_for_testing<SourceVerifier>(
+        x"d04a166e8dcd71127be0012f3e882c9b8c355af7d43dd98f8200b69eb17e312f",
+        scenario.ctx(),
+    );
+    transfer::public_transfer(cap, alice);
+    scenario.next_tx(alice);
+    let registry: Registry = scenario.take_shared();
+    let config: EnclaveConfig<SourceVerifier> = scenario.take_shared();
+    (registry, config, enclave)
+}
+
+#[test]
+#[expected_failure(abort_code = EStaleEnclave)]
+/// Rotating the PCRs revokes an enclave registered against the old ones, even
+/// though its key still signs correctly -- the signature here is the valid one.
+fun attest_source_rejects_stale_enclave() {
+    let alice = @0xA11CE;
+    let mut scenario = test_scenario::begin(alice);
+    let (registry, mut config, enclave) = setup(&mut scenario, alice);
+
+    scenario.next_tx(alice);
+    let cap: enclave::Cap<SourceVerifier> = scenario.take_from_sender();
+    enclave::update_pcrs(&mut config, &cap, PCR0, PCR1, PCR2);
+
+    let _ = attest_source(
+        object::id(&registry),
+        &enclave,
+        &config,
+        object::id_from_address(@0x2a),
+        b"abc".to_string(),
+        b"https://example.com/repo.git".to_string(),
+        b"pkg".to_string(),
+        b"deadbeef".to_string(),
+        b"1.71.1".to_string(),
+        b"xyz".to_string(),
+        1_700_000_000_000,
+        x"d13ea677c4a3e33c9ec5010f0724e55fc19edb8518818653ed88b8b85bf62645d5f2b34d3ff972ae10fb65df2413e9aa39c66e45df6c815b9a43e90716c32a0b",
+        scenario.ctx(),
+    );
+
+    scenario.return_to_sender(cap);
+    test_scenario::return_shared(registry);
+    test_scenario::return_shared(config);
+    enclave::destroy(enclave);
+    scenario.end();
+}
+
 #[test]
 /// `attest_source` accepts a payload correctly signed by a registered enclave
 /// and mints the attestation. The `Enclave<SourceVerifier>` is fabricated with
@@ -198,17 +266,11 @@ fun signing_bytes_match_rust() {
 fun attest_source_accepts_valid_signature() {
     let alice = @0xA11CE;
     let mut scenario = test_scenario::begin(alice);
-    attestations::attestations::init_for_testing(scenario.ctx());
-    let enclave = enclave::new_enclave_for_testing<SourceVerifier>(
-        x"d04a166e8dcd71127be0012f3e882c9b8c355af7d43dd98f8200b69eb17e312f",
-        scenario.ctx(),
-    );
-
-    scenario.next_tx(alice);
-    let registry: Registry = scenario.take_shared();
+    let (registry, config, enclave) = setup(&mut scenario, alice);
     let _ = attest_source(
         object::id(&registry),
         &enclave,
+        &config,
         object::id_from_address(@0x2a),
         b"abc".to_string(),
         b"https://example.com/repo.git".to_string(),
@@ -222,6 +284,7 @@ fun attest_source_accepts_valid_signature() {
     );
 
     test_scenario::return_shared(registry);
+    test_scenario::return_shared(config);
     enclave::destroy(enclave);
     scenario.end();
 }
@@ -232,17 +295,11 @@ fun attest_source_accepts_valid_signature() {
 fun attest_source_rejects_bad_signature() {
     let alice = @0xA11CE;
     let mut scenario = test_scenario::begin(alice);
-    attestations::attestations::init_for_testing(scenario.ctx());
-    let enclave = enclave::new_enclave_for_testing<SourceVerifier>(
-        x"d04a166e8dcd71127be0012f3e882c9b8c355af7d43dd98f8200b69eb17e312f",
-        scenario.ctx(),
-    );
-
-    scenario.next_tx(alice);
-    let registry: Registry = scenario.take_shared();
+    let (registry, config, enclave) = setup(&mut scenario, alice);
     let _ = attest_source(
         object::id(&registry),
         &enclave,
+        &config,
         object::id_from_address(@0x2a),
         b"abc".to_string(),
         b"https://example.com/repo.git".to_string(),
@@ -256,6 +313,7 @@ fun attest_source_rejects_bad_signature() {
     );
 
     test_scenario::return_shared(registry);
+    test_scenario::return_shared(config);
     enclave::destroy(enclave);
     scenario.end();
 }

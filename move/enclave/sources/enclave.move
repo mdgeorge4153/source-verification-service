@@ -144,6 +144,18 @@ public fun pk<T>(enclave: &Enclave<T>): &vector<u8> {
     &enclave.pk
 }
 
+/// The config version this enclave registered against. Compare with
+/// `EnclaveConfig::version` to tell whether the PCRs have rotated since.
+public fun config_version<T>(enclave: &Enclave<T>): u64 {
+    enclave.config_version
+}
+
+/// Incremented by every `update_pcrs`. An enclave whose `config_version` is
+/// behind this registered against PCRs that are no longer expected.
+public fun version<T>(config: &EnclaveConfig<T>): u64 {
+    config.version
+}
+
 public fun destroy_old_enclave<T>(e: Enclave<T>, config: &EnclaveConfig<T>) {
     assert!(e.config_version < config.version, EInvalidConfigVersion);
     let Enclave { id, .. } = e;
@@ -185,11 +197,17 @@ public fun destroy<T>(enclave: Enclave<T>) {
     id.delete();
 }
 
+/// An `Enclave<T>` holding `pk`, without an attestation. For unit tests of code
+/// that consumes a registered enclave, which otherwise needs a live enclave to
+/// obtain one. Destroy it with `destroy`.
 #[test_only]
-/// Fabricate an `Enclave<T>` with a chosen public key, bypassing attestation —
-/// for downstream packages' unit tests of signature-gated functions.
 public fun new_enclave_for_testing<T>(pk: vector<u8>, ctx: &mut TxContext): Enclave<T> {
-    Enclave { id: object::new(ctx), pk, config_version: 0, owner: ctx.sender() }
+    Enclave {
+        id: object::new(ctx),
+        pk,
+        config_version: 0,
+        owner: ctx.sender(),
+    }
 }
 
 #[test_only]
@@ -213,4 +231,46 @@ fun test_serde() {
     );
     let bytes = bcs::to_bytes(&signing_payload);
     assert!(bytes == x"0020b1d110960100000d53616e204672616e636973636f0d00000000000000", 0);
+}
+
+#[test_only]
+public struct TestApp has drop {}
+
+// An ed25519 key pair and a signature over the intent message asserted by
+// `test_serde` above, from the fixed private key seed 0x07 repeated 32 times:
+//
+//   printf '302e020100300506032b657004220420%s' $(printf '07%.0s' $(seq 32)) \
+//     | xxd -r -p | openssl pkey -inform DER -out key.pem
+//   printf '0020b1d110960100000d53616e204672616e636973636f0d00000000000000' \
+//     | xxd -r -p | openssl pkeyutl -sign -inkey key.pem -rawin | xxd -p
+#[test_only]
+const TEST_PK: vector<u8> = x"ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c";
+#[test_only]
+const TEST_SIG: vector<u8> =
+    x"fc1583d7db7a7a5d91f475ade340f02e7ec0a09e6f3a4b2786d99bca32bab9ffd6750f48db7b534e00c4d0d49ef0a3c8371c8f411ce80fae2041fe76d5754403";
+
+#[test]
+fun test_verify_signature() {
+    let mut ctx = tx_context::dummy();
+    let enclave = new_enclave_for_testing<TestApp>(TEST_PK, &mut ctx);
+    let payload = SigningPayload {
+        location: b"San Francisco".to_string(),
+        temperature: 13,
+    };
+    let signature = TEST_SIG;
+    assert!(enclave.verify_signature(0, 1744038900000, payload, &signature));
+    enclave.destroy();
+}
+
+#[test]
+fun test_verify_signature_rejects_tampered_payload() {
+    let mut ctx = tx_context::dummy();
+    let enclave = new_enclave_for_testing<TestApp>(TEST_PK, &mut ctx);
+    let payload = SigningPayload {
+        location: b"San Francisco".to_string(),
+        temperature: 14, // the signature covers 13
+    };
+    let signature = TEST_SIG;
+    assert!(!enclave.verify_signature(0, 1744038900000, payload, &signature));
+    enclave.destroy();
 }

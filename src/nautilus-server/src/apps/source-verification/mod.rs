@@ -106,6 +106,7 @@ pub async fn process_data(
     // Hash the pristine source, then verify it against the on-chain bytecode
     // recorded in the source's Published.toml for this env. What it compared
     // against, and what compiled it, come back from verify-source itself.
+    prune_to_build_inputs(&package_dir)?;
     let source_hash = hash_dir(&package_dir)?;
     let verified = run_verify_source(&package_dir, &req.build_env, &workdir.path.join("move"))?;
     let toolchain = std::fs::read(&verified.binary_path)
@@ -305,11 +306,46 @@ fn run_verify_source(
         .map_err(|e| err(format!("parse verify-source --json output: {e}: {stdout}")))
 }
 
+/// Delete everything in the package directory except the files that determine the
+/// build, leaving `sources/`, `Move.toml`, `Move.lock`, and `Published.toml`.
+///
+/// Done before both hashing and building, so `source_hash` covers *exactly* the
+/// files the rebuild reads: a file outside this set cannot influence the bytecode
+/// and later be changed without changing the hash. It also drops `.git` for a
+/// root-level package (`subdir` empty), which a whole-directory hash would fold
+/// in. `git_sha` is already resolved by this point, so removing `.git` is safe.
+///
+// REVIEW: this is the definition of "the package's source" that source_hash
+// commits to. `move build` compiles `sources/` and resolves dependencies from the
+// manifests; nothing else in the directory affects the bytecode. Confirm this set
+// is complete for the package layouts we care about before relying on it.
+fn prune_to_build_inputs(dir: &Path) -> Result<(), EnclaveError> {
+    const KEEP: &[&str] = &["sources", "Move.toml", "Move.lock", "Published.toml"];
+    for entry in std::fs::read_dir(dir).map_err(|e| err(format!("readdir {dir:?}: {e}")))? {
+        let path = entry.map_err(|e| err(format!("direntry: {e}")))?.path();
+        let keep = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| KEEP.contains(&n));
+        if keep {
+            continue;
+        }
+        let removed = if path.is_dir() {
+            std::fs::remove_dir_all(&path)
+        } else {
+            std::fs::remove_file(&path)
+        };
+        removed.map_err(|e| err(format!("prune {path:?}: {e}")))?;
+    }
+    Ok(())
+}
+
 /// Lowercase hex of a blake2b256 over a lexicographically-sorted manifest of the
 /// package directory:
 /// for each file, `<relative path>` + NUL + `blake2b256(contents)`. Reproducible
 /// from the same source tree; filenames and file boundaries are part of the hash
-/// so content cannot be shuffled between files undetected.
+/// so content cannot be shuffled between files undetected. Runs after
+/// `prune_to_build_inputs`, so "the package directory" is exactly the build inputs.
 fn hash_dir(dir: &Path) -> Result<String, EnclaveError> {
     let mut files = Vec::new();
     collect_files(dir, dir, &mut files)?;

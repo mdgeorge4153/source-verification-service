@@ -74,6 +74,10 @@ COPY --from=user-nit /bin/init initramfs
 RUN cp /src/nautilus-server/target/${TARGET}/release/nautilus-server initramfs
 RUN cp /src/nautilus-server/traffic_forwarder.py initramfs/
 RUN cp /src/nautilus-server/run.sh initramfs/
+# health_check reads this at runtime from the working directory. Without it in
+# the image the read fails silently and endpoints_status comes back empty, so the
+# endpoint reports a healthy-looking response having probed nothing.
+RUN cp /src/nautilus-server/src/apps/${ENCLAVE_APP}/allowed_endpoints.yaml initramfs/
 
 COPY <<-EOF initramfs/etc/environment
 SSL_CERT_FILE=/ca-certificates.crt

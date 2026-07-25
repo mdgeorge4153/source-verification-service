@@ -119,6 +119,11 @@ pub struct HealthCheckResponse {
     pub pk: String,
     /// Status of endpoint connectivity checks
     pub endpoints_status: HashMap<String, bool>,
+    /// Why no checks ran, when `endpoints_status` is empty for a reason other
+    /// than having no endpoints configured. Absent when the checks did run, so a
+    /// healthy response is unchanged.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub endpoints_error: Option<String>,
 }
 
 /// Endpoint that health checks the enclave connectivity to all
@@ -134,13 +139,24 @@ pub async fn health_check(
         .build()
         .map_err(|e| EnclaveError::GenericError(format!("Failed to create HTTP client: {e}")))?;
 
-    // Load allowed endpoints from YAML file
+    // Load allowed endpoints from YAML file. Every failure below also reports
+    // itself in the response: an empty endpoints_status is otherwise
+    // indistinguishable from a healthy enclave with nothing to check.
+    let mut endpoints_error = None;
     let endpoints_status = match std::fs::read_to_string("allowed_endpoints.yaml") {
         Ok(yaml_content) => {
             match serde_yaml::from_str::<serde_yaml::Value>(&yaml_content) {
                 Ok(yaml_value) => {
                     let mut status_map = HashMap::new();
 
+                    if yaml_value
+                        .get("endpoints")
+                        .and_then(|e| e.as_sequence())
+                        .is_none()
+                    {
+                        endpoints_error =
+                            Some("allowed_endpoints.yaml has no 'endpoints' sequence".to_string());
+                    }
                     if let Some(endpoints) =
                         yaml_value.get("endpoints").and_then(|e| e.as_sequence())
                     {
@@ -191,12 +207,14 @@ pub async fn health_check(
                 }
                 Err(e) => {
                     info!("Failed to parse YAML: {}", e);
+                    endpoints_error = Some(format!("could not parse allowed_endpoints.yaml: {e}"));
                     HashMap::new()
                 }
             }
         }
         Err(e) => {
             info!("Failed to read allowed_endpoints.yaml: {}", e);
+            endpoints_error = Some(format!("could not read allowed_endpoints.yaml: {e}"));
             HashMap::new()
         }
     };
@@ -204,5 +222,6 @@ pub async fn health_check(
     Ok(Json(HealthCheckResponse {
         pk: Hex::encode(pk.as_bytes()),
         endpoints_status,
+        endpoints_error,
     }))
 }

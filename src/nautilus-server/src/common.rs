@@ -1,43 +1,34 @@
 // Copyright (c), Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::AppState;
-use crate::EnclaveError;
+use std::collections::HashMap;
+use std::sync::Arc;
+use std::time::Duration;
+
 use axum::{extract::State, Json};
-use fastcrypto::traits::Signer;
-use fastcrypto::{encoding::Encoding, traits::ToFromBytes};
-use fastcrypto::{encoding::Hex, traits::KeyPair as FcKeyPair};
+use fastcrypto::ed25519::Ed25519KeyPair;
+use fastcrypto::encoding::{Encoding, Hex};
+use fastcrypto::traits::{KeyPair as FcKeyPair, Signer, ToFromBytes};
 use nsm_api::api::{Request as NsmRequest, Response as NsmResponse};
 use nsm_api::driver;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_bytes::ByteBuf;
-use std::collections::HashMap;
-use std::fmt::Debug;
-use std::sync::Arc;
-use std::time::Duration;
 use tracing::info;
 
-use fastcrypto::ed25519::Ed25519KeyPair;
-/// ==== COMMON TYPES ====
+use crate::{AppState, EnclaveError};
+
+/// Timeout for each connectivity probe in [`health_check`].
+const HEALTH_CHECK_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// Intent message wrapper struct containing the intent scope and timestamp.
-/// This standardizes the serialized payload for signing.
-/// Generic over the data type T. Intent scope is stored as u8.
+/// This standardizes the serialized payload for signing. Generic over the data
+/// type T. Intent scope is stored as u8.
 #[derive(Serialize, Deserialize)]
 pub struct IntentMessage<T: Serialize> {
     pub intent: u8,
     pub timestamp_ms: u64,
     pub data: T,
-}
-
-impl<T: Serialize> IntentMessage<T> {
-    pub fn new(data: T, timestamp_ms: u64, intent: u8) -> Self {
-        Self {
-            data,
-            timestamp_ms,
-            intent,
-        }
-    }
 }
 
 /// Wrapper struct containing the response (the intent message) and signature.
@@ -53,63 +44,11 @@ pub struct ProcessDataRequest<T> {
     pub payload: T,
 }
 
-/// Sign the bcs bytes of the the payload with keypair.
-pub fn to_signed_response<T: Serialize + Clone>(
-    kp: &Ed25519KeyPair,
-    payload: T,
-    timestamp_ms: u64,
-    intent: u8,
-) -> ProcessedDataResponse<IntentMessage<T>> {
-    let intent_msg = IntentMessage::new(payload.clone(), timestamp_ms, intent);
-
-    let signing_payload = bcs::to_bytes(&intent_msg).expect("should not fail");
-    let sig = kp.sign(&signing_payload);
-    ProcessedDataResponse {
-        response: intent_msg,
-        signature: Hex::encode(sig),
-    }
-}
-
-/// ==== HEALTHCHECK, GET ATTESTASTION ENDPOINT IMPL ====
 /// Response for get attestation.
 #[derive(Debug, Serialize, Deserialize)]
-pub struct GetAttestationResponse {
+pub struct AttestationResponse {
     /// Attestation document serialized in Hex.
     pub attestation: String,
-}
-
-/// Endpoint that returns an attestation committed
-/// to the enclave's public key.
-pub async fn get_attestation(
-    State(state): State<Arc<AppState>>,
-) -> Result<Json<GetAttestationResponse>, EnclaveError> {
-    info!("get attestation called");
-
-    let pk = state.eph_kp.public();
-    let fd = driver::nsm_init();
-
-    // Send attestation request to NSM driver with public key set.
-    let request = NsmRequest::Attestation {
-        user_data: None,
-        nonce: None,
-        public_key: Some(ByteBuf::from(pk.as_bytes().to_vec())),
-    };
-
-    let response = driver::nsm_process_request(fd, request);
-    match response {
-        NsmResponse::Attestation { document } => {
-            driver::nsm_exit(fd);
-            Ok(Json(GetAttestationResponse {
-                attestation: Hex::encode(document),
-            }))
-        }
-        _ => {
-            driver::nsm_exit(fd);
-            Err(EnclaveError::GenericError(
-                "unexpected response".to_string(),
-            ))
-        }
-    }
 }
 
 /// Health check response.
@@ -126,96 +65,90 @@ pub struct HealthCheckResponse {
     pub endpoints_error: Option<String>,
 }
 
-/// Endpoint that health checks the enclave connectivity to all
-/// domains and returns the enclave's public key.
+impl<T: Serialize> IntentMessage<T> {
+    pub fn new(data: T, timestamp_ms: u64, intent: u8) -> Self {
+        Self {
+            data,
+            timestamp_ms,
+            intent,
+        }
+    }
+}
+
+/// Sign the bcs bytes of the payload with keypair.
+pub fn to_signed_response<T: Serialize>(
+    kp: &Ed25519KeyPair,
+    payload: T,
+    timestamp_ms: u64,
+    intent: u8,
+) -> ProcessedDataResponse<IntentMessage<T>> {
+    let intent_msg = IntentMessage::new(payload, timestamp_ms, intent);
+
+    let signing_payload = bcs::to_bytes(&intent_msg).expect("should not fail");
+    let sig = kp.sign(&signing_payload);
+    ProcessedDataResponse {
+        response: intent_msg,
+        signature: Hex::encode(sig),
+    }
+}
+
+/// Endpoint that returns an attestation committed to the enclave's public key.
+pub async fn get_attestation(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<AttestationResponse>, EnclaveError> {
+    info!("get attestation called");
+
+    let pk = state.eph_kp.public();
+    let fd = driver::nsm_init();
+
+    // Send attestation request to NSM driver with public key set.
+    let request = NsmRequest::Attestation {
+        user_data: None,
+        nonce: None,
+        public_key: Some(ByteBuf::from(pk.as_bytes().to_vec())),
+    };
+
+    let response = driver::nsm_process_request(fd, request);
+    driver::nsm_exit(fd);
+
+    match response {
+        NsmResponse::Attestation { document } => Ok(Json(AttestationResponse {
+            attestation: Hex::encode(document),
+        })),
+        other => Err(EnclaveError::GenericError(format!(
+            "NSM returned {other:?} for the attestation request, expected an Attestation document"
+        ))),
+    }
+}
+
+/// Endpoint that health checks the enclave connectivity to all domains and
+/// returns the enclave's public key.
 pub async fn health_check(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<HealthCheckResponse>, EnclaveError> {
     let pk = state.eph_kp.public();
 
-    // Create HTTP client with timeout
     let client = Client::builder()
-        .timeout(Duration::from_secs(5))
+        .timeout(HEALTH_CHECK_TIMEOUT)
         .build()
         .map_err(|e| EnclaveError::GenericError(format!("Failed to create HTTP client: {e}")))?;
 
-    // Load allowed endpoints from YAML file. Every failure below also reports
-    // itself in the response: an empty endpoints_status is otherwise
-    // indistinguishable from a healthy enclave with nothing to check.
-    let mut endpoints_error = None;
-    let endpoints_status = match std::fs::read_to_string("allowed_endpoints.yaml") {
-        Ok(yaml_content) => {
-            match serde_yaml::from_str::<serde_yaml::Value>(&yaml_content) {
-                Ok(yaml_value) => {
-                    let mut status_map = HashMap::new();
-
-                    if yaml_value
-                        .get("endpoints")
-                        .and_then(|e| e.as_sequence())
-                        .is_none()
-                    {
-                        endpoints_error =
-                            Some("allowed_endpoints.yaml has no 'endpoints' sequence".to_string());
-                    }
-                    if let Some(endpoints) =
-                        yaml_value.get("endpoints").and_then(|e| e.as_sequence())
-                    {
-                        for endpoint in endpoints {
-                            if let Some(endpoint_str) = endpoint.as_str() {
-                                // Check connectivity to each endpoint
-                                let url = if endpoint_str.contains(".amazonaws.com") {
-                                    format!("https://{endpoint_str}/ping")
-                                } else {
-                                    format!("https://{endpoint_str}")
-                                };
-
-                                let is_reachable = match client.get(&url).send().await {
-                                    Ok(response) => {
-                                        if endpoint_str.contains(".amazonaws.com") {
-                                            // For AWS endpoints, check if response body contains "healthy"
-                                            match response.text().await {
-                                                Ok(body) => body.to_lowercase().contains("healthy"),
-                                                Err(e) => {
-                                                    info!(
-                                                        "Failed to read response body from {}: {}",
-                                                        endpoint_str, e
-                                                    );
-                                                    false
-                                                }
-                                            }
-                                        } else {
-                                            // For non-AWS endpoints, check for 200 status
-                                            response.status().is_success()
-                                        }
-                                    }
-                                    Err(e) => {
-                                        info!("Failed to connect to {}: {}", endpoint_str, e);
-                                        false
-                                    }
-                                };
-
-                                status_map.insert(endpoint_str.to_string(), is_reachable);
-                                info!(
-                                    "Checked endpoint {}: reachable = {}",
-                                    endpoint_str, is_reachable
-                                );
-                            }
-                        }
-                    }
-
-                    status_map
-                }
-                Err(e) => {
-                    info!("Failed to parse YAML: {}", e);
-                    endpoints_error = Some(format!("could not parse allowed_endpoints.yaml: {e}"));
-                    HashMap::new()
-                }
+    // An empty endpoints_status is otherwise indistinguishable from a healthy
+    // enclave with nothing to check, so a failure to read the endpoints is
+    // reported in endpoints_error rather than swallowed.
+    let (endpoints_status, endpoints_error) = match allowed_endpoints() {
+        Ok(hosts) => {
+            let mut status = HashMap::new();
+            for host in hosts {
+                let reachable = check_endpoint(&client, &host).await;
+                info!("Checked endpoint {host}: reachable = {reachable}");
+                status.insert(host, reachable);
             }
+            (status, None)
         }
         Err(e) => {
-            info!("Failed to read allowed_endpoints.yaml: {}", e);
-            endpoints_error = Some(format!("could not read allowed_endpoints.yaml: {e}"));
-            HashMap::new()
+            info!("{e}");
+            (HashMap::new(), Some(e))
         }
     };
 
@@ -224,4 +157,51 @@ pub async fn health_check(
         endpoints_status,
         endpoints_error,
     }))
+}
+
+/// The hosts listed under `endpoints:` in `allowed_endpoints.yaml`. Returns an
+/// error message, for the health response, if the file cannot be read or parsed
+/// or has no `endpoints` sequence.
+fn allowed_endpoints() -> Result<Vec<String>, String> {
+    let yaml = std::fs::read_to_string("allowed_endpoints.yaml")
+        .map_err(|e| format!("could not read allowed_endpoints.yaml: {e}"))?;
+    let value: serde_yaml::Value = serde_yaml::from_str(&yaml)
+        .map_err(|e| format!("could not parse allowed_endpoints.yaml: {e}"))?;
+    let Some(hosts) = value.get("endpoints").and_then(|e| e.as_sequence()) else {
+        return Err("allowed_endpoints.yaml has no 'endpoints' sequence".to_string());
+    };
+    Ok(hosts
+        .iter()
+        .filter_map(|h| h.as_str().map(str::to_string))
+        .collect())
+}
+
+/// Whether `host` answers a health probe. AWS endpoints must return a body
+/// containing "healthy"; other hosts must return a success status.
+async fn check_endpoint(client: &Client, host: &str) -> bool {
+    let is_aws = host.contains(".amazonaws.com");
+    let url = if is_aws {
+        format!("https://{host}/ping")
+    } else {
+        format!("https://{host}")
+    };
+
+    let response = match client.get(&url).send().await {
+        Ok(response) => response,
+        Err(e) => {
+            info!("Failed to connect to {host}: {e}");
+            return false;
+        }
+    };
+
+    if !is_aws {
+        return response.status().is_success();
+    }
+    match response.text().await {
+        Ok(body) => body.to_lowercase().contains("healthy"),
+        Err(e) => {
+            info!("Failed to read response body from {host}: {e}");
+            false
+        }
+    }
 }
